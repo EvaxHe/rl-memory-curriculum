@@ -215,6 +215,39 @@ The training data comes from [LoCoMo](https://arxiv.org/abs/2402.17753) and
 - [LongMemEval](https://arxiv.org/abs/2410.10813) — Wu et al., ICLR 2025 (benchmark)
 - [GRPO](https://arxiv.org/abs/2402.03300) — Shao et al., 2024 (RL algorithm)
 
+## Troubleshooting
+
+### `extra_special_tokens` AttributeError with transformers >= 4.52
+
+If you see:
+```
+AttributeError: 'list' object has no attribute 'keys'
+```
+when loading checkpoints, this is caused by a breaking change in `transformers>=4.52.0` where
+`extra_special_tokens` in `tokenizer_config.json` must be a **dict** instead of a **list**.
+
+Run the following script from the project root to fix all checkpoint tokenizer configs:
+
+```python
+import json, glob
+
+files = glob.glob('checkpoints/*/answer_agent/tokenizer_config.json') + \
+        glob.glob('checkpoints/*/memory_manager/tokenizer_config.json')
+
+for f in sorted(files):
+    with open(f) as fp:
+        cfg = json.load(fp)
+    est = cfg.get('extra_special_tokens')
+    if isinstance(est, list):
+        cfg['extra_special_tokens'] = {t: t for t in est}
+        with open(f, 'w') as fp:
+            json.dump(cfg, fp, indent=2, ensure_ascii=False)
+            fp.write('\n')
+        print(f'Fixed: {f}')
+    else:
+        print(f'OK:    {f}')
+```
+
 ## License
 
 MIT

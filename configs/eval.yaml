@@ -55,9 +55,12 @@ evaluation:
     max_tokens: 256
 
   hardware:
-    gpus: 1
+    backend: "vllm"            # "hf" (HuggingFace transformers) or "vllm"
+    gpus: 1                     # tensor_parallel_size for vLLM
     precision: "bf16"
-    batch_size: 8
+    batch_size: 8               # HF backend only; vLLM handles batching internally
+    gpu_memory_utilization: 0.85  # vLLM only; reduced to 0.45 automatically when AA+MM both loaded
+    max_model_len: 16384        # vLLM max sequence length (Qwen2.5-7B supports up to 32768)
 
   retrieval:
     top_k: 60
