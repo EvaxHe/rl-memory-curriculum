@@ -518,7 +518,7 @@ Message: {turn['text'][:500]}
         num_generations=group_size,
         max_completion_length=max_completion,
         num_train_epochs=mm_epochs,
-        save_steps=50,
+        save_steps=300,
         save_total_limit=2,
         max_grad_norm=0.1,
         seed=seed,
