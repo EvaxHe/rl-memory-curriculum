@@ -26,10 +26,10 @@ package = false
 
 [tool.uv.sources]
 torch = [
-    { index = "pytorch-cu130", marker = "platform_machine == 'x86_64' and (platform_system == 'Linux' or platform_system == 'Windows')" },
+    { index = "pytorch-cu128", marker = "platform_machine == 'x86_64' and (platform_system == 'Linux' or platform_system == 'Windows')" },
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true

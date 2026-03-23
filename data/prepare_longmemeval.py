@@ -34,6 +34,7 @@ from the 5 non-abstention categories, plus any abstention variants).
 import json
 import logging
 import random
+import subprocess
 from pathlib import Path
 from collections import defaultdict, Counter
 
@@ -148,13 +149,27 @@ def main():
 
     raw_file = resolve_raw_file()
     if raw_file is None:
-        logger.error("Raw file not found. Looked for:")
-        for candidate in RAW_CANDIDATES:
-            logger.error(f"  - {candidate}")
-        logger.error("You must clone the repo AND download the dataset JSON into data/raw/longmemeval/data/.")
-        logger.error("Run: git clone https://github.com/xiaowu0162/LongMemEval data/raw/longmemeval")
-        logger.error("Run: curl -L -o data/raw/longmemeval/data/longmemeval_s_cleaned.json https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json")
-        return
+        clone_dir = Path("data/raw/longmemeval")
+        if not clone_dir.exists():
+            logger.info(f"Raw data not found. Cloning LongMemEval repo into {clone_dir}...")
+            subprocess.run(
+                ["git", "clone", "https://github.com/xiaowu0162/LongMemEval", str(clone_dir)],
+                check=True,
+            )
+        # Download the cleaned dataset JSON if not present
+        target_json = clone_dir / "data" / "longmemeval_s_cleaned.json"
+        if not target_json.exists():
+            target_json.parent.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Downloading longmemeval_s_cleaned.json into {target_json}...")
+            subprocess.run(
+                ["curl", "-L", "-o", str(target_json),
+                 "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json"],
+                check=True,
+            )
+        raw_file = resolve_raw_file()
+        if raw_file is None:
+            logger.error("Raw file still not found after auto-download.")
+            return
 
     with open(raw_file, encoding="utf-8") as f:
         raw_data = json.load(f)

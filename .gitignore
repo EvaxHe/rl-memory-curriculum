@@ -45,3 +45,4 @@ data/processed/
 # Generated evaluation artifacts
 results/*_predictions.jsonl
 results/judge_done.flag
+checkpoints

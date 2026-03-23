@@ -21,9 +21,16 @@
 set -e
 
 if ! command -v uv >/dev/null 2>&1; then
-    echo "ERROR: uv is not installed."
-    echo "Install uv: https://docs.astral.sh/uv/getting-started/installation/"
-    exit 1
+    echo "=== Installing uv ==="
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    # Source the cargo/uv env so the current shell can find it
+    source "$HOME/.local/bin/env" 2>/dev/null || source "$HOME/.cargo/env" 2>/dev/null || true
+    if ! command -v uv >/dev/null 2>&1; then
+        echo "ERROR: uv installation failed. Please install manually:"
+        echo "  https://docs.astral.sh/uv/getting-started/installation/"
+        exit 1
+    fi
+    echo "uv installed successfully: $(uv --version)"
 fi
 
 CONFIG_DIR="configs"
@@ -66,7 +73,7 @@ uv run python3 -c "
 import torch
 assert torch.cuda.is_available(), 'No GPU found!'
 name = torch.cuda.get_device_name(0)
-vram = torch.cuda.get_device_properties(0).total_mem / 1e9
+vram = torch.cuda.get_device_properties(0).total_memory / 1e9
 print(f'GPU: {name} ({vram:.1f} GB)')
 "
 echo ""

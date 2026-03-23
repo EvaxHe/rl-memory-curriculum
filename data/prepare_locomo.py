@@ -29,6 +29,7 @@ Output format (JSONL):
 import json
 import logging
 import random
+import subprocess
 from pathlib import Path
 from collections import Counter
 
@@ -145,9 +146,16 @@ def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
     if not RAW_FILE.exists():
-        logger.error(f"Raw file not found: {RAW_FILE}")
-        logger.error("Run: git clone https://github.com/snap-research/locomo data/raw/locomo")
-        return
+        clone_dir = RAW_FILE.parent.parent  # data/raw/locomo
+        if not clone_dir.exists():
+            logger.info(f"Raw data not found. Cloning LoCoMo repo into {clone_dir}...")
+            subprocess.run(
+                ["git", "clone", "https://github.com/snap-research/locomo", str(clone_dir)],
+                check=True,
+            )
+        if not RAW_FILE.exists():
+            logger.error(f"Raw file still not found after clone: {RAW_FILE}")
+            return
 
     with open(RAW_FILE, encoding="utf-8") as f:
         raw_data = json.load(f)
