@@ -20,6 +20,12 @@
 # ============================================================
 set -e
 
+if ! command -v uv >/dev/null 2>&1; then
+    echo "ERROR: uv is not installed."
+    echo "Install uv: https://docs.astral.sh/uv/getting-started/installation/"
+    exit 1
+fi
+
 CONFIG_DIR="configs"
 DRY_RUN=false
 
@@ -54,14 +60,9 @@ for cfg in "$CONFIG_A" "$CONFIG_B" "$CONFIG_C"; do
     fi
 done
 
-# Activate venv if present
-if [ -f ".venv/bin/activate" ]; then
-    source .venv/bin/activate
-fi
-
 # 0. Verify GPU
 echo "=== Step 0: GPU Check ==="
-python3 -c "
+uv run python3 -c "
 import torch
 assert torch.cuda.is_available(), 'No GPU found!'
 name = torch.cuda.get_device_name(0)
@@ -81,9 +82,9 @@ fi
 
 # 1. Data prep
 echo "=== Step 1: Data Preparation ==="
-python3 data/prepare_locomo.py
-python3 data/prepare_longmemeval.py
-python3 data/prepare_mixed.py
+uv run python3 data/prepare_locomo.py
+uv run python3 data/prepare_longmemeval.py
+uv run python3 data/prepare_mixed.py
 echo ""
 
 START_TIME=$(date +%s)
@@ -96,7 +97,7 @@ for label_config in "A:$CONFIG_A:config_a_locomo_only" "B:$CONFIG_B:config_b_mix
         echo "=== Training Config ${label} — Answer Agent ==="
         echo "Config: $config"
         echo "Start: $(date)"
-        python3 src/train_grpo.py --config "$config" --agent answer_agent
+        uv run python3 src/train_grpo.py --config "$config" --agent answer_agent
         echo "Config ${label} AA done: $(date)"
         echo ""
     else
@@ -112,7 +113,7 @@ for label_config in "A:$CONFIG_A:config_a_locomo_only" "B:$CONFIG_B:config_b_mix
         echo "=== Training Config ${label} — Memory Manager ==="
         echo "Config: $config"
         echo "Start: $(date)"
-        python3 src/train_grpo.py --config "$config" --agent memory_manager
+        uv run python3 src/train_grpo.py --config "$config" --agent memory_manager
         echo "Config ${label} MM done: $(date)"
         echo ""
     else
@@ -123,13 +124,13 @@ done
 # 8. Evaluation
 echo "=== Step 8: Evaluation ==="
 echo "Start: $(date)"
-python3 eval/run_eval.py --config "$EVAL_CONFIG" --skip-judge ${EVAL_EXTRA}
+uv run python3 eval/run_eval.py --config "$EVAL_CONFIG" --skip-judge ${EVAL_EXTRA}
 echo "Eval done: $(date)"
 echo ""
 
 # 9. Analysis + paper tables
 echo "=== Step 9: Analysis ==="
-python3 eval/analyze_results.py --results "${RESULTS_DIR}/all_results.json" --output paper/tables/
+uv run python3 eval/analyze_results.py --results "${RESULTS_DIR}/all_results.json" --output paper/tables/
 echo ""
 
 # Timing

@@ -39,7 +39,12 @@ from collections import defaultdict, Counter
 
 logger = logging.getLogger(__name__)
 
-RAW_FILE = Path("data/raw/longmemeval/data/longmemeval_s_cleaned.json")  # https://github.com/xiaowu0162/LongMemEval
+RAW_CANDIDATES = [
+    Path("data/raw/longmemeval/data/longmemeval_s_cleaned.json"),
+    Path("data/raw/longmemeval/data/longmemeval_s.json"),
+    Path("data/raw/longmemeval/longmemeval_s_cleaned.json"),
+    Path("data/raw/longmemeval/longmemeval_s.json"),
+]
 OUTPUT_DIR = Path("data/processed")
 
 TRAIN_PER_CATEGORY = 10  # 10 per category
@@ -124,23 +129,36 @@ def create_stratified_split(examples: list[dict], seed: int = 42):
 
 def save_jsonl(data: list[dict], path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         for item in data:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
     logger.info(f"Saved {len(data)} examples to {path}")
 
 
+def resolve_raw_file() -> Path | None:
+    """Find LongMemEval source file from common download/layout variants."""
+    for candidate in RAW_CANDIDATES:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    if not RAW_FILE.exists():
-        logger.error(f"Raw file not found: {RAW_FILE}")
+    raw_file = resolve_raw_file()
+    if raw_file is None:
+        logger.error("Raw file not found. Looked for:")
+        for candidate in RAW_CANDIDATES:
+            logger.error(f"  - {candidate}")
+        logger.error("You must clone the repo AND download the dataset JSON into data/raw/longmemeval/data/.")
         logger.error("Run: git clone https://github.com/xiaowu0162/LongMemEval data/raw/longmemeval")
+        logger.error("Run: curl -L -o data/raw/longmemeval/data/longmemeval_s_cleaned.json https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json")
         return
 
-    with open(RAW_FILE) as f:
+    with open(raw_file, encoding="utf-8") as f:
         raw_data = json.load(f)
-    logger.info(f"Loaded {len(raw_data)} questions from {RAW_FILE}")
+    logger.info(f"Loaded {len(raw_data)} questions from {raw_file}")
 
     # Build standardized examples
     examples = build_examples(raw_data)

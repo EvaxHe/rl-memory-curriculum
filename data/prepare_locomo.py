@@ -135,7 +135,7 @@ def create_splits(examples: list[dict], seed: int = 42):
 
 def save_jsonl(data: list[dict], path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         for item in data:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
     logger.info(f"Saved {len(data)} examples to {path}")
@@ -149,7 +149,7 @@ def main():
         logger.error("Run: git clone https://github.com/snap-research/locomo data/raw/locomo")
         return
 
-    with open(RAW_FILE) as f:
+    with open(RAW_FILE, encoding="utf-8") as f:
         raw_data = json.load(f)
     logger.info(f"Loaded {len(raw_data)} conversations from {RAW_FILE}")
 

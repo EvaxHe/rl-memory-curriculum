@@ -24,18 +24,32 @@ a controlled curriculum experiment across three training configurations.
 ## Quick Start
 
 ```bash
-bash scripts/setup.sh           # create venv, install deps, download tokenizer
+bash scripts/setup.sh           # create uv-managed venv, sync deps, download tokenizer
 bash scripts/run_all.sh         # train 3 configs, evaluate, generate tables
+```
+
+Dependencies are managed with `uv` via `pyproject.toml`.
+Torch is configured to use CUDA wheels (cu130) on Linux/Windows x86_64.
+
+To verify GPU runtime after setup:
+```bash
+uv run python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
 ```
 
 Raw and processed benchmark data are not committed to GitHub. To prepare data locally:
 ```bash
 git clone https://github.com/snap-research/locomo data/raw/locomo
 git clone https://github.com/xiaowu0162/LongMemEval data/raw/longmemeval
+
+# LongMemEval repo clone does not include the benchmark json by default.
+curl -L -o data/raw/longmemeval/data/longmemeval_s_cleaned.json \
+	https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
+
 python data/prepare_locomo.py
 python data/prepare_longmemeval.py
 python data/prepare_mixed.py
 ```
+If you use the project environment, run these via `uv run python ...`.
 The setup and run scripts detect local processed files automatically once they exist.
 
 ## Hardware Requirements
@@ -169,7 +183,7 @@ The pipeline runs `--skip-judge` by default. To add judge scores after eval:
 
 ```bash
 export OPENAI_API_KEY=sk-...
-python eval/run_eval.py --config configs/eval.yaml --judge-only
+uv run python eval/run_eval.py --config configs/eval.yaml --judge-only
 ```
 
 Any OpenAI-compatible endpoint works — set `OPENAI_BASE_URL` for local/proxy APIs.

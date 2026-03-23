@@ -41,6 +41,10 @@ run the prep scripts:
 git clone https://github.com/snap-research/locomo data/raw/locomo
 git clone https://github.com/xiaowu0162/LongMemEval data/raw/longmemeval
 
+# 0.1 Download LongMemEval data file (the repo clone alone does not include it)
+curl -L -o data/raw/longmemeval/data/longmemeval_s_cleaned.json \
+    https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
+
 # 1. Process LoCoMo (152 train / 81 val / 1307 test)
 python data/prepare_locomo.py
 
