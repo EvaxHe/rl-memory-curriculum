@@ -12,6 +12,7 @@ Usage:
     python eval/run_eval.py --config configs/eval.yaml --backend vllm --gpus 4
     python eval/run_eval.py --config configs/eval.yaml --skip-judge
     python eval/run_eval.py --config configs/eval.yaml --judge-only
+    python eval/run_eval.py --config configs/eval.yaml --aggregate-only
     python eval/run_eval.py --config configs/eval.yaml --models config_a_full
 """
 import argparse
@@ -336,6 +337,96 @@ def run_mm_on_sessions_vllm(mm_llm, sessions, max_new_tokens=256):
     return [e.content for e in bank.get_all()]
 
 
+def run_mm_all_conversations_vllm(mm_llm, conv_sessions, max_new_tokens=256):
+    """
+    Batch MM processing across all conversations using vLLM.
+
+    Instead of processing each conversation sequentially (batch_size=1 per vLLM call),
+    this processes all conversations step-wise: at each step, gather one pending turn
+    from every active conversation and send them as a single batch to vLLM.
+
+    conv_sessions: dict of {conv_id: sessions_list}
+    Returns: dict of {conv_id: list[str]} (memory strings per conversation)
+    """
+    from vllm import SamplingParams
+    from src.memory_bank import MemoryBank
+    from src.memory_manager import build_mm_prompt, parse_mm_output, execute_mm_operation
+
+    tokenizer = mm_llm.get_tokenizer()
+    sampling_params = SamplingParams(
+        temperature=0.3, top_p=0.9, max_tokens=max_new_tokens,
+    )
+
+    # Build per-conversation state: bank + flattened turn queue
+    conv_banks = {}
+    conv_turn_queues = {}
+    for conv_id, sessions in conv_sessions.items():
+        conv_banks[conv_id] = MemoryBank(use_embeddings=False)
+        turns = []
+        for session in sessions:
+            sid = session.get("session_id", 0)
+            for i, turn in enumerate(session.get("turns", [])):
+                turns.append((sid, i, turn))
+        conv_turn_queues[conv_id] = turns
+
+    # Track position per conversation
+    conv_positions = {conv_id: 0 for conv_id in conv_turn_queues}
+    total_turns = sum(len(q) for q in conv_turn_queues.values())
+    processed = 0
+    step = 0
+
+    while True:
+        # Gather one pending turn from each active conversation
+        batch_conv_ids = []
+        batch_texts = []
+        batch_sids = []
+
+        for conv_id, pos in conv_positions.items():
+            queue = conv_turn_queues[conv_id]
+            if pos >= len(queue):
+                continue
+            sid, turn_idx, turn = queue[pos]
+            bank = conv_banks[conv_id]
+            messages = build_mm_prompt(
+                bank, session_id=sid, turn_id=turn_idx,
+                speaker=turn["speaker"], message=turn["text"][:500],
+            )
+            text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+            )
+            batch_conv_ids.append(conv_id)
+            batch_texts.append(text)
+            batch_sids.append(sid)
+
+        if not batch_texts:
+            break
+
+        step += 1
+        if step % 10 == 1 or len(batch_texts) > 1:
+            logger.info(
+                f"  MM batch step {step}: {len(batch_texts)} prompts "
+                f"({processed}/{total_turns} turns done)"
+            )
+
+        outputs = mm_llm.generate(batch_texts, sampling_params)
+
+        for conv_id, sid, output in zip(batch_conv_ids, batch_sids, outputs):
+            raw_output = output.outputs[0].text
+            bank = conv_banks[conv_id]
+            operation = parse_mm_output(raw_output)
+            execute_mm_operation(operation, bank, session_id=sid)
+            bank.advance_turn()
+            conv_positions[conv_id] += 1
+            processed += 1
+
+    logger.info(f"  MM batched processing complete: {processed} turns in {step} steps")
+
+    return {
+        conv_id: [e.content for e in bank.get_all()]
+        for conv_id, bank in conv_banks.items()
+    }
+
+
 # ============================================================
 # Inference orchestration
 # ============================================================
@@ -580,18 +671,22 @@ def run_inference(model, tokenizer, model_config, benchmark_config,
     all_prompts = []
     all_metadata = []
 
+    # Batch MM across all conversations when using vLLM
+    if use_mm and backend == "vllm":
+        conv_sessions_map = {}
+        for conv_id, examples in conv_groups.items():
+            sessions = examples[0].get("sessions", [])
+            conv_sessions_map[conv_id] = sessions
+        logger.info(f"Building memories via batched MM for {len(conv_sessions_map)} conversations...")
+        conv_memories = run_mm_all_conversations_vllm(mm_model, conv_sessions_map)
+
     for conv_idx, (conv_id, examples) in enumerate(conv_groups.items()):
         if conv_id not in conv_memories:
             sessions = examples[0].get("sessions", [])
             if use_mm:
-                if backend == "vllm":
-                    conv_memories[conv_id] = run_mm_on_sessions_vllm(
-                        mm_model, sessions,
-                    )
-                else:
-                    conv_memories[conv_id] = run_mm_on_sessions(
-                        mm_model, mm_tokenizer, sessions,
-                    )
+                conv_memories[conv_id] = run_mm_on_sessions(
+                    mm_model, mm_tokenizer, sessions,
+                )
             else:
                 conv_memories[conv_id] = build_heuristic_memories(sessions)
         memories = conv_memories[conv_id]
@@ -695,6 +790,8 @@ def main():
                         help="Inference backend: 'hf' (HuggingFace) or 'vllm'. Overrides config.")
     parser.add_argument("--gpus", type=int, default=None,
                         help="Number of GPUs for tensor parallelism (vLLM). Overrides config.")
+    parser.add_argument("--aggregate-only", action="store_true",
+                        help="Read existing prediction files, recompute metrics, and write all_results.json (no inference/judging)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
@@ -761,6 +858,39 @@ def main():
             all_results[model_name] = model_results
         save_results(all_results, output_dir / "all_results.json")
         logger.info(f"Judge results saved to {output_dir}")
+        print_comparison_table(all_results)
+        return
+
+    # --aggregate-only: read existing predictions, recompute metrics, write all_results.json
+    if args.aggregate_only:
+        all_results = {}
+        for model_cfg in config["evaluation"]["models"]:
+            model_name = model_cfg["name"]
+            if args.models and model_name not in args.models:
+                continue
+            model_results = {}
+            for bench_cfg in config["evaluation"]["benchmarks"]:
+                bench_name = bench_cfg["name"]
+                if args.benchmarks and bench_name not in args.benchmarks:
+                    continue
+                pred_path = output_dir / f"{model_name}_{bench_name}_predictions.jsonl"
+                if not pred_path.exists():
+                    logger.warning(f"No predictions found: {pred_path}, skipping")
+                    continue
+                predictions = []
+                with open(pred_path) as f:
+                    for line in f:
+                        if line.strip():
+                            predictions.append(json.loads(line))
+                logger.info(f"Aggregating {len(predictions)} predictions for {model_name}/{bench_name}")
+                results = evaluate_predictions(predictions)
+                model_results[bench_name] = results
+                print(format_results_table(results, f"{model_name} / {bench_name}"))
+                print()
+            if model_results:
+                all_results[model_name] = model_results
+        save_results(all_results, output_dir / "all_results.json")
+        logger.info(f"Aggregated results saved to {output_dir / 'all_results.json'}")
         print_comparison_table(all_results)
         return
 
