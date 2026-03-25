@@ -34,12 +34,18 @@ from the 5 non-abstention categories, plus any abstention variants).
 import json
 import logging
 import random
+import subprocess
 from pathlib import Path
 from collections import defaultdict, Counter
 
 logger = logging.getLogger(__name__)
 
-RAW_FILE = Path("data/raw/longmemeval/data/longmemeval_s_cleaned.json")  # https://github.com/xiaowu0162/LongMemEval
+RAW_CANDIDATES = [
+    Path("data/raw/longmemeval/data/longmemeval_s_cleaned.json"),
+    Path("data/raw/longmemeval/data/longmemeval_s.json"),
+    Path("data/raw/longmemeval/longmemeval_s_cleaned.json"),
+    Path("data/raw/longmemeval/longmemeval_s.json"),
+]
 OUTPUT_DIR = Path("data/processed")
 
 TRAIN_PER_CATEGORY = 10  # 10 per category
@@ -124,23 +130,50 @@ def create_stratified_split(examples: list[dict], seed: int = 42):
 
 def save_jsonl(data: list[dict], path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         for item in data:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
     logger.info(f"Saved {len(data)} examples to {path}")
 
 
+def resolve_raw_file() -> Path | None:
+    """Find LongMemEval source file from common download/layout variants."""
+    for candidate in RAW_CANDIDATES:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
-    if not RAW_FILE.exists():
-        logger.error(f"Raw file not found: {RAW_FILE}")
-        logger.error("Run: git clone https://github.com/xiaowu0162/LongMemEval data/raw/longmemeval")
-        return
+    raw_file = resolve_raw_file()
+    if raw_file is None:
+        clone_dir = Path("data/raw/longmemeval")
+        if not clone_dir.exists():
+            logger.info(f"Raw data not found. Cloning LongMemEval repo into {clone_dir}...")
+            subprocess.run(
+                ["git", "clone", "https://github.com/xiaowu0162/LongMemEval", str(clone_dir)],
+                check=True,
+            )
+        # Download the cleaned dataset JSON if not present
+        target_json = clone_dir / "data" / "longmemeval_s_cleaned.json"
+        if not target_json.exists():
+            target_json.parent.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Downloading longmemeval_s_cleaned.json into {target_json}...")
+            subprocess.run(
+                ["curl", "-L", "-o", str(target_json),
+                 "https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json"],
+                check=True,
+            )
+        raw_file = resolve_raw_file()
+        if raw_file is None:
+            logger.error("Raw file still not found after auto-download.")
+            return
 
-    with open(RAW_FILE) as f:
+    with open(raw_file, encoding="utf-8") as f:
         raw_data = json.load(f)
-    logger.info(f"Loaded {len(raw_data)} questions from {RAW_FILE}")
+    logger.info(f"Loaded {len(raw_data)} questions from {raw_file}")
 
     # Build standardized examples
     examples = build_examples(raw_data)

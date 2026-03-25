@@ -4,6 +4,8 @@ Local dry-run of the full eval pipeline with dummy predictions.
 Generates fake predictions for all 7 models × 2 benchmarks,
 runs metrics, judge (mocked), and analysis to verify tables render.
 
+Also tests vLLM code paths (with mocked vLLM imports).
+
 Usage:
     python -m pytest tests/test_eval_dry_run.py -v
     python tests/test_eval_dry_run.py  # standalone
@@ -13,6 +15,7 @@ import random
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -240,10 +243,81 @@ def test_full_eval_pipeline_dry_run():
         print("\n✓ Full eval pipeline dry-run PASSED")
 
 
+def test_vllm_generate_answers():
+    """Test vLLM answer generation code path with mocked vLLM."""
+    from eval.run_eval import extract_answer, format_aa_prompt
+
+    # Mock vLLM output object
+    mock_output_obj = MagicMock()
+    mock_output_obj.outputs = [MagicMock(text="<answer>Paris</answer>")]
+
+    mock_llm = MagicMock()
+    mock_tokenizer = MagicMock()
+    mock_tokenizer.apply_chat_template.return_value = "formatted prompt"
+    mock_llm.get_tokenizer.return_value = mock_tokenizer
+    mock_llm.generate.return_value = [mock_output_obj, mock_output_obj]
+
+    mock_sampling_params = MagicMock()
+
+    with patch.dict("sys.modules", {
+        "vllm": MagicMock(SamplingParams=lambda **kwargs: mock_sampling_params),
+    }):
+        from eval.run_eval import generate_answers_vllm
+        prompts = [
+            format_aa_prompt("What is the capital of France?", ["France is in Europe"]),
+            format_aa_prompt("Who wrote Hamlet?", ["Shakespeare was a playwright"]),
+        ]
+        answers = generate_answers_vllm(mock_llm, prompts)
+        assert len(answers) == 2
+        assert answers[0] == "Paris"
+        mock_llm.generate.assert_called_once()
+
+
+def test_vllm_extract_answer_fallback():
+    """Test extract_answer handles non-tagged vLLM output gracefully."""
+    from eval.run_eval import extract_answer
+    assert extract_answer("<answer>42</answer>") == "42"
+    assert extract_answer("The answer is 42") == "The answer is 42"
+    assert extract_answer("line1\nline2\nline3") == "line3"
+    assert extract_answer("") == ""
+
+
+def test_detect_checkpoint_type():
+    """Test _detect_checkpoint_type auto-detection from config flags."""
+    from eval.run_eval import _detect_checkpoint_type
+
+    # Explicit lora flag
+    is_lora, is_full_ft = _detect_checkpoint_type(
+        "/nonexistent", {"lora": True}
+    )
+    assert is_lora is True
+    assert is_full_ft is False
+
+    # Explicit full_ft flag
+    is_lora, is_full_ft = _detect_checkpoint_type(
+        "/nonexistent", {"full_ft": True}
+    )
+    assert is_lora is False
+    assert is_full_ft is True
+
+    # Baseline
+    is_lora, is_full_ft = _detect_checkpoint_type(
+        "/nonexistent", {"is_baseline": True}
+    )
+    assert is_lora is False
+    assert is_full_ft is False
+
+
 if __name__ == "__main__":
     test_metrics_on_dummy_predictions()
     print("✓ test_metrics_on_dummy_predictions passed")
     test_format_results_table()
     print("✓ test_format_results_table passed")
     test_full_eval_pipeline_dry_run()
+    test_vllm_generate_answers()
+    print("✓ test_vllm_generate_answers passed")
+    test_vllm_extract_answer_fallback()
+    print("✓ test_vllm_extract_answer_fallback passed")
+    test_detect_checkpoint_type()
+    print("✓ test_detect_checkpoint_type passed")
     print("\n✓ All eval dry-run tests passed")

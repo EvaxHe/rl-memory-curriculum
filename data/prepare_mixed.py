@@ -21,7 +21,7 @@ OUTPUT_DIR = Path("data/processed")
 
 def load_jsonl(path: Path) -> list[dict]:
     data = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             if line.strip():
                 data.append(json.loads(line))
@@ -30,7 +30,7 @@ def load_jsonl(path: Path) -> list[dict]:
 
 def save_jsonl(data: list[dict], path: Path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
+    with open(path, "w", encoding="utf-8") as f:
         for item in data:
             f.write(json.dumps(item, ensure_ascii=False) + "\n")
     logger.info(f"Saved {len(data)} examples to {path}")

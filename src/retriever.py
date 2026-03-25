@@ -31,7 +31,7 @@ def get_embedder(model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
             logger.warning(
                 "sentence-transformers not installed. "
                 "Falling back to keyword search. "
-                "Install with: pip install sentence-transformers"
+                "Install with: uv add sentence-transformers"
             )
             return None
     return _model

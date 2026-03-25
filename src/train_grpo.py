@@ -113,7 +113,7 @@ def format_reward_func(completions, **kwargs) -> list[float]:
 def load_training_data(data_path: str) -> list[dict]:
     """Load JSONL training data."""
     data = []
-    with open(data_path) as f:
+    with open(data_path, encoding="utf-8") as f:
         for line in f:
             if line.strip():
                 data.append(json.loads(line))
@@ -401,7 +401,7 @@ def train_answer_agent(config: dict):
         "lora_r": 16 if use_lora else None,
         "lora_alpha": 32 if use_lora else None,
     }
-    with open(f"{output_dir}/training_meta.json", "w") as f:
+    with open(f"{output_dir}/training_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
     logger.info(f"AA training complete. Saved to {output_dir}")
@@ -518,7 +518,7 @@ Message: {turn['text'][:500]}
         num_generations=group_size,
         max_completion_length=max_completion,
         num_train_epochs=mm_epochs,
-        save_steps=50,
+        save_steps=300,
         save_total_limit=2,
         max_grad_norm=0.1,
         seed=seed,
@@ -568,7 +568,7 @@ Message: {turn['text'][:500]}
         "lora_r": 16 if use_lora else None,
         "lora_alpha": 32 if use_lora else None,
     }
-    with open(f"{output_dir}/training_meta.json", "w") as f:
+    with open(f"{output_dir}/training_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
     logger.info(f"MM training complete. Saved to {output_dir}")
@@ -579,7 +579,7 @@ Message: {turn['text'][:500]}
 # ============================================================
 
 def load_config(config_path: str) -> dict:
-    with open(config_path) as f:
+    with open(config_path, encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 

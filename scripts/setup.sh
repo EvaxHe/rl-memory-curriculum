@@ -1,26 +1,24 @@
 #!/bin/bash
-# Generic setup: create venv, install deps, download tokenizer.
+# Generic setup: create uv-managed venv, sync deps, download tokenizer.
 # Works on any machine with Python 3.10+ and a GPU.
 set -e
 
 echo "=== rl-memory-curriculum setup ==="
 
-# Create venv
-if [ ! -d ".venv" ]; then
-    echo "Creating virtual environment..."
-    python3 -m venv .venv
+# Ensure uv is available
+if ! command -v uv >/dev/null 2>&1; then
+    echo "ERROR: uv is not installed."
+    echo "Install uv: https://docs.astral.sh/uv/getting-started/installation/"
+    exit 1
 fi
 
-source .venv/bin/activate
-pip install --upgrade pip
-
-# Install dependencies
-echo "Installing dependencies..."
-pip install -r requirements.txt
+# Install dependencies into uv-managed .venv
+echo "Syncing dependencies with uv..."
+uv sync
 
 # Pre-download tokenizer (model weights download on first training run)
 echo "Pre-downloading tokenizer..."
-python3 -c "
+uv run python3 -c "
 from transformers import AutoTokenizer
 tok = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-7B-Instruct')
 print(f'Tokenizer ready: vocab_size={tok.vocab_size}')
@@ -29,7 +27,7 @@ print(f'Tokenizer ready: vocab_size={tok.vocab_size}')
 # Verify GPU
 echo ""
 echo "Checking GPU..."
-python3 -c "
+uv run python3 -c "
 import torch
 if torch.cuda.is_available():
     name = torch.cuda.get_device_name(0)
@@ -43,14 +41,30 @@ else:
 
 echo ""
 echo "Checking data..."
+LOCOMO_RAW_DIR="data/raw/locomo"
+LONGMEMEVAL_RAW_DIR="data/raw/longmemeval"
+
 if [ -f "data/processed/locomo_train.jsonl" ]; then
     echo "Processed data found. Ready to train."
-elif [ -f "data/raw/locomo/data/locomo10.json" ]; then
-    echo "Raw data found. run_all.sh will process it automatically."
 else
-    echo "NOTE: No data found. Clone raw data before training:"
-    echo "  git clone https://github.com/snap-research/locomo data/raw/locomo"
-    echo "  git clone https://github.com/xiaowu0162/LongMemEval data/raw/longmemeval"
+    if [ -f "$LOCOMO_RAW_DIR/data/locomo10.json" ]; then
+        echo "Raw data found. run_all.sh will process it automatically."
+    else
+        echo "Raw data not found. Cloning required repositories..."
+        mkdir -p data/raw
+
+        if [ ! -d "$LOCOMO_RAW_DIR/.git" ]; then
+            git clone https://github.com/snap-research/locomo "$LOCOMO_RAW_DIR"
+        else
+            echo "locomo repo already present: $LOCOMO_RAW_DIR"
+        fi
+
+        if [ ! -d "$LONGMEMEVAL_RAW_DIR/.git" ]; then
+            git clone https://github.com/xiaowu0162/LongMemEval "$LONGMEMEVAL_RAW_DIR"
+        else
+            echo "LongMemEval repo already present: $LONGMEMEVAL_RAW_DIR"
+        fi
+    fi
 fi
 
 echo ""

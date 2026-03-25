@@ -2,18 +2,26 @@
 Run evaluation across all configs and benchmarks.
 
 Behavior controlled by eval YAML config.
+Supports two inference backends:
+  - "hf"   : HuggingFace Transformers model.generate() with manual batching
+  - "vllm" : vLLM offline LLM engine with continuous batching + PagedAttention
 
 Usage:
     python eval/run_eval.py --config configs/eval.yaml
+    python eval/run_eval.py --config configs/eval.yaml --backend vllm
+    python eval/run_eval.py --config configs/eval.yaml --backend vllm --gpus 4
     python eval/run_eval.py --config configs/eval.yaml --skip-judge
     python eval/run_eval.py --config configs/eval.yaml --judge-only
+    python eval/run_eval.py --config configs/eval.yaml --aggregate-only
     python eval/run_eval.py --config configs/eval.yaml --models config_a_full
 """
 import argparse
+import gc
 import json
 import logging
 import re
 import sys
+import tempfile
 import yaml
 from pathlib import Path
 from collections import defaultdict
@@ -253,6 +261,173 @@ def generate_answers_batched(model, tokenizer, prompts_list,
 
 
 # ============================================================
+# vLLM answer generation
+# ============================================================
+
+def generate_answers_vllm(llm, prompts_list, max_new_tokens=1024,
+                          temperature=0.3, top_p=0.9):
+    """
+    Generate answers for all prompts using vLLM offline engine.
+    vLLM handles continuous batching + PagedAttention internally.
+
+    prompts_list: list of chat message lists (one per question).
+    Returns list of extracted answer strings.
+    """
+    from vllm import SamplingParams
+
+    tokenizer = llm.get_tokenizer()
+    texts = []
+    for messages in prompts_list:
+        text = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True
+        )
+        texts.append(text)
+
+    sampling_params = SamplingParams(
+        temperature=temperature,
+        top_p=top_p,
+        max_tokens=max_new_tokens,
+    )
+
+    logger.info(f"vLLM generating {len(texts)} prompts...")
+    outputs = llm.generate(texts, sampling_params)
+
+    answers = []
+    for output in outputs:
+        raw_output = output.outputs[0].text
+        answers.append(extract_answer(raw_output))
+
+    return answers
+
+
+def run_mm_on_sessions_vllm(mm_llm, sessions, max_new_tokens=256):
+    """
+    Run trained Memory Manager on all dialogue turns using vLLM.
+    Sequential per conversation (each turn depends on memory state from prior turns).
+    Returns list of memory strings.
+    """
+    from vllm import SamplingParams
+    from src.memory_bank import MemoryBank
+    from src.memory_manager import build_mm_prompt, parse_mm_output, execute_mm_operation
+
+    tokenizer = mm_llm.get_tokenizer()
+    sampling_params = SamplingParams(
+        temperature=0.3, top_p=0.9, max_tokens=max_new_tokens,
+    )
+    bank = MemoryBank(use_embeddings=False)
+
+    for session in sessions:
+        sid = session.get("session_id", 0)
+        for i, turn in enumerate(session.get("turns", [])):
+            messages = build_mm_prompt(
+                bank, session_id=sid, turn_id=i,
+                speaker=turn["speaker"], message=turn["text"][:500],
+            )
+            text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+            )
+
+            outputs = mm_llm.generate([text], sampling_params)
+            raw_output = outputs[0].outputs[0].text
+
+            operation = parse_mm_output(raw_output)
+            execute_mm_operation(operation, bank, session_id=sid)
+            bank.advance_turn()
+
+    return [e.content for e in bank.get_all()]
+
+
+def run_mm_all_conversations_vllm(mm_llm, conv_sessions, max_new_tokens=256):
+    """
+    Batch MM processing across all conversations using vLLM.
+
+    Instead of processing each conversation sequentially (batch_size=1 per vLLM call),
+    this processes all conversations step-wise: at each step, gather one pending turn
+    from every active conversation and send them as a single batch to vLLM.
+
+    conv_sessions: dict of {conv_id: sessions_list}
+    Returns: dict of {conv_id: list[str]} (memory strings per conversation)
+    """
+    from vllm import SamplingParams
+    from src.memory_bank import MemoryBank
+    from src.memory_manager import build_mm_prompt, parse_mm_output, execute_mm_operation
+
+    tokenizer = mm_llm.get_tokenizer()
+    sampling_params = SamplingParams(
+        temperature=0.3, top_p=0.9, max_tokens=max_new_tokens,
+    )
+
+    # Build per-conversation state: bank + flattened turn queue
+    conv_banks = {}
+    conv_turn_queues = {}
+    for conv_id, sessions in conv_sessions.items():
+        conv_banks[conv_id] = MemoryBank(use_embeddings=False)
+        turns = []
+        for session in sessions:
+            sid = session.get("session_id", 0)
+            for i, turn in enumerate(session.get("turns", [])):
+                turns.append((sid, i, turn))
+        conv_turn_queues[conv_id] = turns
+
+    # Track position per conversation
+    conv_positions = {conv_id: 0 for conv_id in conv_turn_queues}
+    total_turns = sum(len(q) for q in conv_turn_queues.values())
+    processed = 0
+    step = 0
+
+    while True:
+        # Gather one pending turn from each active conversation
+        batch_conv_ids = []
+        batch_texts = []
+        batch_sids = []
+
+        for conv_id, pos in conv_positions.items():
+            queue = conv_turn_queues[conv_id]
+            if pos >= len(queue):
+                continue
+            sid, turn_idx, turn = queue[pos]
+            bank = conv_banks[conv_id]
+            messages = build_mm_prompt(
+                bank, session_id=sid, turn_id=turn_idx,
+                speaker=turn["speaker"], message=turn["text"][:500],
+            )
+            text = tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True,
+            )
+            batch_conv_ids.append(conv_id)
+            batch_texts.append(text)
+            batch_sids.append(sid)
+
+        if not batch_texts:
+            break
+
+        step += 1
+        if step % 10 == 1 or len(batch_texts) > 1:
+            logger.info(
+                f"  MM batch step {step}: {len(batch_texts)} prompts "
+                f"({processed}/{total_turns} turns done)"
+            )
+
+        outputs = mm_llm.generate(batch_texts, sampling_params)
+
+        for conv_id, sid, output in zip(batch_conv_ids, batch_sids, outputs):
+            raw_output = output.outputs[0].text
+            bank = conv_banks[conv_id]
+            operation = parse_mm_output(raw_output)
+            execute_mm_operation(operation, bank, session_id=sid)
+            bank.advance_turn()
+            conv_positions[conv_id] += 1
+            processed += 1
+
+    logger.info(f"  MM batched processing complete: {processed} turns in {step} steps")
+
+    return {
+        conv_id: [e.content for e in bank.get_all()]
+        for conv_id, bank in conv_banks.items()
+    }
+
+
+# ============================================================
 # Inference orchestration
 # ============================================================
 
@@ -319,6 +494,108 @@ def load_mm_model(model_config):
     return mm_model, mm_tokenizer
 
 
+# ============================================================
+# vLLM model loading
+# ============================================================
+
+def _detect_checkpoint_type(checkpoint, model_config):
+    """Auto-detect LoRA vs full FT from training_meta.json. Returns (is_lora, is_full_ft)."""
+    is_lora = model_config.get("lora", False)
+    is_full_ft = model_config.get("full_ft", False)
+    if not is_lora and not is_full_ft and not model_config.get("is_baseline", False):
+        meta_path = Path(checkpoint) / "training_meta.json"
+        if meta_path.exists():
+            with open(meta_path) as f:
+                meta = json.load(f)
+            if meta.get("use_lora", False):
+                is_lora = True
+            elif meta.get("use_lora") is False:
+                is_full_ft = True
+            logger.info(f"Auto-detected: lora={is_lora}, full_ft={is_full_ft}")
+    return is_lora, is_full_ft
+
+
+def _merge_lora_to_tmpdir(checkpoint, base_model_name):
+    """Merge LoRA adapter into base model and save to a temp directory for vLLM."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import PeftModel
+
+    logger.info(f"Merging LoRA {checkpoint} into {base_model_name} for vLLM...")
+    base = AutoModelForCausalLM.from_pretrained(
+        base_model_name, torch_dtype=torch.bfloat16, device_map="cpu",
+    )
+    merged = PeftModel.from_pretrained(base, checkpoint)
+    merged = merged.merge_and_unload()
+    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
+
+    tmpdir = tempfile.mkdtemp(prefix="vllm_merged_")
+    merged.save_pretrained(tmpdir)
+    tokenizer.save_pretrained(tmpdir)
+    del base, merged
+    gc.collect()
+    logger.info(f"Merged LoRA checkpoint saved to {tmpdir}")
+    return tmpdir
+
+
+def load_model_vllm(model_config, gpu_memory_utilization=0.85,
+                     tensor_parallel_size=1, max_model_len=4096):
+    """Load model via vLLM offline LLM engine. Returns vllm.LLM instance."""
+    from vllm import LLM
+
+    checkpoint = model_config["checkpoint"]
+    is_lora, is_full_ft = _detect_checkpoint_type(checkpoint, model_config)
+
+    if is_lora:
+        base_model_name = model_config.get("base_model", "Qwen/Qwen2.5-7B-Instruct")
+        model_path = _merge_lora_to_tmpdir(checkpoint, base_model_name)
+    else:
+        model_path = checkpoint
+
+    logger.info(f"Loading vLLM model: {model_path} (tp={tensor_parallel_size}, "
+                f"gpu_mem={gpu_memory_utilization})")
+    llm = LLM(
+        model=model_path,
+        dtype="bfloat16",
+        gpu_memory_utilization=gpu_memory_utilization,
+        tensor_parallel_size=tensor_parallel_size,
+        max_model_len=max_model_len,
+        trust_remote_code=True,
+    )
+    return llm
+
+
+def load_mm_model_vllm(model_config, gpu_memory_utilization=0.45,
+                        tensor_parallel_size=1, max_model_len=4096):
+    """Load Memory Manager model via vLLM. Returns vllm.LLM instance or None."""
+    from vllm import LLM
+
+    mm_checkpoint = model_config.get("mm_checkpoint")
+    if not mm_checkpoint:
+        logger.warning("use_mm=true but no mm_checkpoint specified, falling back to heuristic")
+        return None
+
+    is_lora, is_full_ft = _detect_checkpoint_type(mm_checkpoint, model_config)
+
+    if is_lora:
+        base_model_name = model_config.get("base_model", "Qwen/Qwen2.5-7B-Instruct")
+        model_path = _merge_lora_to_tmpdir(mm_checkpoint, base_model_name)
+    else:
+        model_path = mm_checkpoint
+
+    logger.info(f"Loading vLLM MM model: {model_path} (tp={tensor_parallel_size}, "
+                f"gpu_mem={gpu_memory_utilization})")
+    llm = LLM(
+        model=model_path,
+        dtype="bfloat16",
+        gpu_memory_utilization=gpu_memory_utilization,
+        tensor_parallel_size=tensor_parallel_size,
+        max_model_len=max_model_len,
+        trust_remote_code=True,
+    )
+    return llm
+
+
 def run_mm_on_sessions(mm_model, mm_tokenizer, sessions, max_new_tokens=256):
     """
     Run trained Memory Manager on all dialogue turns to build a memory bank.
@@ -363,21 +640,21 @@ def run_mm_on_sessions(mm_model, mm_tokenizer, sessions, max_new_tokens=256):
 def run_inference(model, tokenizer, model_config, benchmark_config,
                   retrieval_top_k=20, max_examples=None, use_batched=True,
                   inference_batch_size=8, max_new_tokens=1024,
-                  mm_model=None, mm_tokenizer=None):
+                  mm_model=None, mm_tokenizer=None,
+                  backend="hf"):
     """
     Run inference for a loaded model on a benchmark.
     Groups questions by conversation_id.
-    Supports batched generation for speed.
 
-    If mm_model is provided (use_mm=true), uses trained MM to build memories
-    instead of heuristic memory construction.
+    backend="hf": model/tokenizer are HF objects, mm_model/mm_tokenizer are HF objects.
+    backend="vllm": model is vllm.LLM, tokenizer is None, mm_model is vllm.LLM, mm_tokenizer is None.
     """
     model_name = model_config["name"]
     benchmark_name = benchmark_config["name"]
     test_file = benchmark_config["test_file"]
     use_mm = model_config.get("use_mm", False) and mm_model is not None
 
-    logger.info(f"Running {model_name} on {benchmark_name} ({test_file})")
+    logger.info(f"Running {model_name} on {benchmark_name} ({test_file}) [backend={backend}]")
     logger.info(f"Memory construction: {'trained MM' if use_mm else 'heuristic'}")
     test_data = load_test_data(test_file)
     if max_examples and len(test_data) > max_examples:
@@ -393,6 +670,15 @@ def run_inference(model, tokenizer, model_config, benchmark_config,
     conv_memories = {}
     all_prompts = []
     all_metadata = []
+
+    # Batch MM across all conversations when using vLLM
+    if use_mm and backend == "vllm":
+        conv_sessions_map = {}
+        for conv_id, examples in conv_groups.items():
+            sessions = examples[0].get("sessions", [])
+            conv_sessions_map[conv_id] = sessions
+        logger.info(f"Building memories via batched MM for {len(conv_sessions_map)} conversations...")
+        conv_memories = run_mm_all_conversations_vllm(mm_model, conv_sessions_map)
 
     for conv_idx, (conv_id, examples) in enumerate(conv_groups.items()):
         if conv_id not in conv_memories:
@@ -423,16 +709,21 @@ def run_inference(model, tokenizer, model_config, benchmark_config,
                 "memory_source": "trained_mm" if use_mm else "heuristic",
             })
 
-    # Generate answers (batched or sequential)
-    if use_batched and len(all_prompts) > 1:
-        logger.info(f"Generating answers (batched, batch_size={inference_batch_size})...")
+    # Generate answers
+    if backend == "vllm":
+        logger.info(f"Generating answers via vLLM ({len(all_prompts)} prompts)...")
+        answers = generate_answers_vllm(
+            model, all_prompts, max_new_tokens=max_new_tokens,
+        )
+    elif use_batched and len(all_prompts) > 1:
+        logger.info(f"Generating answers (HF batched, batch_size={inference_batch_size})...")
         answers = generate_answers_batched(
             model, tokenizer, all_prompts,
             max_new_tokens=max_new_tokens,
             batch_size=inference_batch_size,
         )
     else:
-        logger.info("Generating answers (sequential)...")
+        logger.info("Generating answers (HF sequential)...")
         answers = []
         for i, prompt in enumerate(all_prompts):
             answer = generate_answer(model, tokenizer,
@@ -494,20 +785,43 @@ def main():
                         help="Override retrieval top-k from config")
     parser.add_argument("--max-examples", type=int, default=None)
     parser.add_argument("--no-batch", action="store_true",
-                        help="Disable batched inference")
+                        help="Disable batched inference (HF backend only)")
+    parser.add_argument("--backend", type=str, choices=["hf", "vllm"], default=None,
+                        help="Inference backend: 'hf' (HuggingFace) or 'vllm'. Overrides config.")
+    parser.add_argument("--gpus", type=int, default=None,
+                        help="Number of GPUs for tensor parallelism (vLLM). Overrides config.")
+    parser.add_argument("--aggregate-only", action="store_true",
+                        help="Read existing prediction files, recompute metrics, and write all_results.json (no inference/judging)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s: %(message)s")
     config = load_config(args.config)
+    hw_cfg = config["evaluation"].get("hardware", {})
     output_dir = Path(config["evaluation"]["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Backend: CLI > config > default "hf"
+    backend = args.backend or hw_cfg.get("backend", "hf")
+    if backend == "vllm":
+        try:
+            import vllm  # noqa: F401
+        except ImportError:
+            logger.error("vLLM not installed. Install with: pip install 'rl-memory-curriculum[vllm]'")
+            sys.exit(1)
+
+    # Hardware settings
+    tensor_parallel_size = args.gpus or hw_cfg.get("gpus", 1)
+    gpu_memory_utilization = hw_cfg.get("gpu_memory_utilization", 0.85)
+    max_model_len = hw_cfg.get("max_model_len", 4096)
 
     # Retrieval top-k: CLI > config > default 20
     retrieval_top_k = (args.retrieval_top_k
                        or config["evaluation"].get("retrieval", {}).get("top_k", 20))
-    inference_batch_size = config["evaluation"].get("hardware", {}).get("batch_size", 8)
+    inference_batch_size = hw_cfg.get("batch_size", 8)
     max_new_tokens = 1024  # Phase 2 default
+
+    logger.info(f"Backend: {backend}, GPUs (TP): {tensor_parallel_size}")
 
     # --judge-only: read existing predictions, run judge, recompute metrics
     if args.judge_only:
@@ -547,6 +861,39 @@ def main():
         print_comparison_table(all_results)
         return
 
+    # --aggregate-only: read existing predictions, recompute metrics, write all_results.json
+    if args.aggregate_only:
+        all_results = {}
+        for model_cfg in config["evaluation"]["models"]:
+            model_name = model_cfg["name"]
+            if args.models and model_name not in args.models:
+                continue
+            model_results = {}
+            for bench_cfg in config["evaluation"]["benchmarks"]:
+                bench_name = bench_cfg["name"]
+                if args.benchmarks and bench_name not in args.benchmarks:
+                    continue
+                pred_path = output_dir / f"{model_name}_{bench_name}_predictions.jsonl"
+                if not pred_path.exists():
+                    logger.warning(f"No predictions found: {pred_path}, skipping")
+                    continue
+                predictions = []
+                with open(pred_path) as f:
+                    for line in f:
+                        if line.strip():
+                            predictions.append(json.loads(line))
+                logger.info(f"Aggregating {len(predictions)} predictions for {model_name}/{bench_name}")
+                results = evaluate_predictions(predictions)
+                model_results[bench_name] = results
+                print(format_results_table(results, f"{model_name} / {bench_name}"))
+                print()
+            if model_results:
+                all_results[model_name] = model_results
+        save_results(all_results, output_dir / "all_results.json")
+        logger.info(f"Aggregated results saved to {output_dir / 'all_results.json'}")
+        print_comparison_table(all_results)
+        return
+
     all_results = {}
 
     for model_cfg in config["evaluation"]["models"]:
@@ -554,14 +901,40 @@ def main():
         if args.models and model_name not in args.models:
             continue
 
-        logger.info(f"Loading model: {model_name}")
-        model, tokenizer = load_model_and_tokenizer(model_cfg)
+        use_mm = model_cfg.get("use_mm", False)
 
-        # Load MM model if use_mm is set
-        mm_model, mm_tokenizer = None, None
-        if model_cfg.get("use_mm", False):
-            logger.info(f"Loading MM model for {model_name}")
-            mm_model, mm_tokenizer = load_mm_model(model_cfg)
+        if backend == "vllm":
+            # Reduce gpu_memory_utilization when loading both AA and MM
+            aa_gpu_mem = gpu_memory_utilization if not use_mm else min(gpu_memory_utilization, 0.45)
+            mm_gpu_mem = 0.45 if use_mm else 0.0
+
+            logger.info(f"Loading model (vLLM): {model_name}")
+            model = load_model_vllm(
+                model_cfg,
+                gpu_memory_utilization=aa_gpu_mem,
+                tensor_parallel_size=tensor_parallel_size,
+                max_model_len=max_model_len,
+            )
+            tokenizer = None  # vLLM handles tokenization internally
+
+            mm_model, mm_tokenizer = None, None
+            if use_mm:
+                logger.info(f"Loading MM model (vLLM) for {model_name}")
+                mm_model = load_mm_model_vllm(
+                    model_cfg,
+                    gpu_memory_utilization=mm_gpu_mem,
+                    tensor_parallel_size=tensor_parallel_size,
+                    max_model_len=max_model_len,
+                )
+                mm_tokenizer = None
+        else:
+            logger.info(f"Loading model (HF): {model_name}")
+            model, tokenizer = load_model_and_tokenizer(model_cfg)
+
+            mm_model, mm_tokenizer = None, None
+            if use_mm:
+                logger.info(f"Loading MM model (HF) for {model_name}")
+                mm_model, mm_tokenizer = load_mm_model(model_cfg)
 
         model_results = {}
 
@@ -583,6 +956,7 @@ def main():
                 max_new_tokens=max_new_tokens,
                 mm_model=mm_model,
                 mm_tokenizer=mm_tokenizer,
+                backend=backend,
             )
 
             if not args.skip_judge and "llm_judge" in config["evaluation"]["metrics"]:
@@ -605,9 +979,14 @@ def main():
 
         all_results[model_name] = model_results
 
-        del model, tokenizer
+        del model
+        if tokenizer is not None:
+            del tokenizer
         if mm_model is not None:
-            del mm_model, mm_tokenizer
+            del mm_model
+        if mm_tokenizer is not None:
+            del mm_tokenizer
+        gc.collect()
         try:
             import torch
             if torch.cuda.is_available():
