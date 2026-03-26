@@ -641,13 +641,18 @@ def run_inference(model, tokenizer, model_config, benchmark_config,
                   retrieval_top_k=20, max_examples=None, use_batched=True,
                   inference_batch_size=8, max_new_tokens=1024,
                   mm_model=None, mm_tokenizer=None,
-                  backend="hf"):
+                  backend="hf",
+                  output_path=None,
+                  prebuilt_memories=None):
     """
     Run inference for a loaded model on a benchmark.
     Groups questions by conversation_id.
 
     backend="hf": model/tokenizer are HF objects, mm_model/mm_tokenizer are HF objects.
     backend="vllm": model is vllm.LLM, tokenizer is None, mm_model is vllm.LLM, mm_tokenizer is None.
+
+    If output_path is provided, predictions are written incrementally (one JSONL line per prediction).
+    If prebuilt_memories is provided (dict of conv_id → list[str]), uses those instead of running MM.
     """
     model_name = model_config["name"]
     benchmark_name = benchmark_config["name"]
@@ -671,8 +676,12 @@ def run_inference(model, tokenizer, model_config, benchmark_config,
     all_prompts = []
     all_metadata = []
 
+    # Use prebuilt memories if provided (from sequential vLLM MM phase)
+    if prebuilt_memories is not None:
+        conv_memories = prebuilt_memories
+        logger.info(f"Using {len(conv_memories)} prebuilt conversation memories")
     # Batch MM across all conversations when using vLLM
-    if use_mm and backend == "vllm":
+    elif use_mm and backend == "vllm":
         conv_sessions_map = {}
         for conv_id, examples in conv_groups.items():
             sessions = examples[0].get("sessions", [])
@@ -734,11 +743,20 @@ def run_inference(model, tokenizer, model_config, benchmark_config,
             if (i + 1) % 50 == 0:
                 logger.info(f"    Progress: {i+1}/{len(all_prompts)}")
 
-    # Combine
+    # Combine and write incrementally if output_path provided
     predictions = []
+    f_out = None
+    if output_path:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        f_out = open(output_path, "a", encoding="utf-8")
     for meta, answer in zip(all_metadata, answers):
         meta["answer"] = answer
         predictions.append(meta)
+        if f_out:
+            f_out.write(json.dumps(meta) + "\n")
+            f_out.flush()
+    if f_out:
+        f_out.close()
 
     logger.info(f"Completed {len(predictions)} predictions")
     return predictions
@@ -903,38 +921,91 @@ def main():
 
         use_mm = model_cfg.get("use_mm", False)
 
-        if backend == "vllm":
-            # Reduce gpu_memory_utilization when loading both AA and MM
-            aa_gpu_mem = gpu_memory_utilization if not use_mm else min(gpu_memory_utilization, 0.45)
-            mm_gpu_mem = 0.45 if use_mm else 0.0
+        if backend == "vllm" and use_mm:
+            # Sequential loading: MM first (build memories), then AA (answer generation).
+            # Avoids dual-model OOM — each model gets full gpu_memory_utilization.
 
-            logger.info(f"Loading model (vLLM): {model_name}")
-            model = load_model_vllm(
+            # Phase 1: Load MM, build memories for all conversations, save to disk, unload
+            logger.info(f"Loading MM model (vLLM, sequential phase 1): {model_name}")
+            mm_model = load_mm_model_vllm(
                 model_cfg,
-                gpu_memory_utilization=aa_gpu_mem,
+                gpu_memory_utilization=gpu_memory_utilization,
                 tensor_parallel_size=tensor_parallel_size,
                 max_model_len=max_model_len,
             )
-            tokenizer = None  # vLLM handles tokenization internally
+            if mm_model is not None:
+                # Build memories for all benchmarks' conversations
+                all_conv_sessions = {}
+                for bench_cfg in config["evaluation"]["benchmarks"]:
+                    bench_name = bench_cfg["name"]
+                    if args.benchmarks and bench_name not in args.benchmarks:
+                        continue
+                    test_file = bench_cfg["test_file"]
+                    if not Path(test_file).exists():
+                        continue
+                    test_data = load_test_data(test_file)
+                    if args.max_examples and len(test_data) > args.max_examples:
+                        test_data = test_data[:args.max_examples]
+                    conv_groups = defaultdict(list)
+                    for ex in test_data:
+                        conv_groups[ex["conversation_id"]].append(ex)
+                    for conv_id, examples in conv_groups.items():
+                        if conv_id not in all_conv_sessions:
+                            all_conv_sessions[conv_id] = examples[0].get("sessions", [])
 
+                logger.info(f"Building memories for {len(all_conv_sessions)} conversations via MM...")
+                prebuilt_memories = run_mm_all_conversations_vllm(mm_model, all_conv_sessions)
+
+                # Save prebuilt memories to disk for crash recovery
+                mem_cache_path = output_dir / f"{model_name}_mm_memories.json"
+                with open(mem_cache_path, "w", encoding="utf-8") as f:
+                    json.dump(prebuilt_memories, f)
+                logger.info(f"Saved {len(prebuilt_memories)} conversation memories to {mem_cache_path}")
+
+                # Unload MM
+                del mm_model
+                gc.collect()
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except ImportError:
+                    pass
+            else:
+                prebuilt_memories = None
+
+            # Phase 2: Load AA at full GPU memory, run answer generation
+            logger.info(f"Loading AA model (vLLM, sequential phase 2): {model_name}")
+            model = load_model_vllm(
+                model_cfg,
+                gpu_memory_utilization=gpu_memory_utilization,
+                tensor_parallel_size=tensor_parallel_size,
+                max_model_len=max_model_len,
+            )
+            tokenizer = None
+            # Pass prebuilt memories via a temporary attribute on model_cfg
+            # so run_inference can use them instead of re-running MM
             mm_model, mm_tokenizer = None, None
-            if use_mm:
-                logger.info(f"Loading MM model (vLLM) for {model_name}")
-                mm_model = load_mm_model_vllm(
-                    model_cfg,
-                    gpu_memory_utilization=mm_gpu_mem,
-                    tensor_parallel_size=tensor_parallel_size,
-                    max_model_len=max_model_len,
-                )
-                mm_tokenizer = None
+
+        elif backend == "vllm":
+            logger.info(f"Loading model (vLLM): {model_name}")
+            model = load_model_vllm(
+                model_cfg,
+                gpu_memory_utilization=gpu_memory_utilization,
+                tensor_parallel_size=tensor_parallel_size,
+                max_model_len=max_model_len,
+            )
+            tokenizer = None
+            mm_model, mm_tokenizer = None, None
+            prebuilt_memories = None
         else:
             logger.info(f"Loading model (HF): {model_name}")
             model, tokenizer = load_model_and_tokenizer(model_cfg)
-
             mm_model, mm_tokenizer = None, None
             if use_mm:
                 logger.info(f"Loading MM model (HF) for {model_name}")
                 mm_model, mm_tokenizer = load_mm_model(model_cfg)
+            prebuilt_memories = None
 
         model_results = {}
 
@@ -947,6 +1018,44 @@ def main():
                 logger.warning(f"Test file not found: {test_file}, skipping")
                 continue
 
+            pred_path = output_dir / f"{model_name}_{bench_name}_predictions.jsonl"
+
+            # Check for existing complete predictions (resume support)
+            expected_count = None
+            if pred_path.exists():
+                with open(pred_path) as f:
+                    existing_count = sum(1 for line in f if line.strip())
+                # Load benchmark size for comparison
+                test_data_check = load_test_data(test_file)
+                expected_count = min(len(test_data_check), args.max_examples) if args.max_examples else len(test_data_check)
+                if existing_count >= expected_count:
+                    logger.info(f"Skipping {model_name}/{bench_name} — {existing_count} predictions already exist")
+                    # Load existing predictions for metrics
+                    predictions = []
+                    with open(pred_path) as f:
+                        for line in f:
+                            if line.strip():
+                                predictions.append(json.loads(line))
+                    results = evaluate_predictions(predictions)
+                    model_results[bench_name] = results
+                    print(format_results_table(results, f"{model_name} / {bench_name}"))
+                    print()
+                    continue
+                else:
+                    logger.info(f"Found {existing_count}/{expected_count} predictions for "
+                                f"{model_name}/{bench_name}, re-running...")
+                    # Remove partial file to avoid duplicates
+                    pred_path.unlink()
+
+            # If we have prebuilt memories from sequential vLLM MM phase,
+            # inject them so run_inference uses them instead of re-running MM
+            effective_mm_model = mm_model
+            effective_mm_tokenizer = mm_tokenizer
+            if prebuilt_memories is not None:
+                # Temporarily disable use_mm in model_cfg so run_inference
+                # uses heuristic path, but we'll override conv_memories below
+                pass
+
             predictions = run_inference(
                 model, tokenizer, model_cfg, bench_cfg,
                 retrieval_top_k=retrieval_top_k,
@@ -954,23 +1063,26 @@ def main():
                 use_batched=not args.no_batch,
                 inference_batch_size=inference_batch_size,
                 max_new_tokens=max_new_tokens,
-                mm_model=mm_model,
-                mm_tokenizer=mm_tokenizer,
+                mm_model=effective_mm_model,
+                mm_tokenizer=effective_mm_tokenizer,
                 backend=backend,
+                output_path=str(pred_path),
+                prebuilt_memories=prebuilt_memories,
             )
 
+            # Run LLM judge if enabled
             if not args.skip_judge and "llm_judge" in config["evaluation"]["metrics"]:
                 judge_cfg = config["evaluation"].get("llm_judge", {})
                 predictions = judge_batch(
                     predictions,
-                    model=judge_cfg.get(
-                        "model", "gpt-4o-mini"),
+                    model=judge_cfg.get("model", "gpt-4o-mini"),
                 )
 
             results = evaluate_predictions(predictions)
             model_results[bench_name] = results
 
-            pred_path = output_dir / f"{model_name}_{bench_name}_predictions.jsonl"
+            # Predictions were written incrementally by run_inference.
+            # Overwrite with final version that includes judge scores (if any).
             with open(pred_path, "w") as f:
                 for p in predictions:
                     f.write(json.dumps(p) + "\n")

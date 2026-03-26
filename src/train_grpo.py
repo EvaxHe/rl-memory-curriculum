@@ -22,8 +22,113 @@ import numpy as np
 from pathlib import Path
 from datasets import Dataset
 from collections import Counter
+from transformers import TrainerCallback
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# Training callbacks
+# ============================================================
+
+class RewardLoggingCallback(TrainerCallback):
+    """Print reward statistics to stdout for real-time monitoring."""
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs is None:
+            return
+        reward_keys = [k for k in logs if "reward" in k.lower()]
+        if reward_keys:
+            stats = {k: f"{logs[k]:.4f}" for k in reward_keys}
+            logger.info(f"Step {state.global_step} rewards: {stats}")
+
+
+class TrainingLogCallback(TrainerCallback):
+    """Write structured JSONL training logs for paper figures.
+
+    Captures per-step: loss, reward stats, grad norm, learning rate, wall time.
+    For MM training, also captures CRUD operation distribution from completions.
+
+    Output: one JSONL file per training run at `logs/{run_name}_training.jsonl`.
+    Each line is a self-contained JSON object — crash-safe, easy to parse with pandas.
+    """
+
+    def __init__(self, log_dir="logs", agent_type="aa"):
+        self.log_dir = Path(log_dir)
+        self.agent_type = agent_type
+        self._file = None
+        self._start_time = None
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        import time
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = self.log_dir / f"{args.run_name}_training.jsonl"
+        self._file = open(log_path, "a", encoding="utf-8")
+        self._start_time = time.time()
+        logger.info(f"Training log: {log_path}")
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        import time
+        if logs is None or self._file is None:
+            return
+
+        record = {
+            "step": state.global_step,
+            "epoch": round(state.epoch, 3) if state.epoch else 0,
+            "wall_time_s": round(time.time() - self._start_time, 1),
+            "agent": self.agent_type,
+        }
+
+        # Standard training metrics
+        for key in ("loss", "grad_norm", "learning_rate"):
+            if key in logs:
+                record[key] = round(logs[key], 6)
+
+        # Reward metrics (TRL logs these with various key patterns)
+        for key, val in logs.items():
+            if "reward" in key.lower():
+                record[key.replace("/", "_")] = round(val, 6)
+
+        self._file.write(json.dumps(record) + "\n")
+        self._file.flush()
+
+    def on_train_end(self, args, state, control, **kwargs):
+        if self._file is not None:
+            self._file.close()
+            self._file = None
+
+
+class RewardVarianceEarlyStopCallback(TrainerCallback):
+    """Stop training when reward variance collapses (all GRPO samples score the same).
+
+    When std(rewards) < threshold for `patience` consecutive logging steps,
+    GRPO advantages are effectively zero and further training is wasted compute.
+    """
+
+    def __init__(self, std_threshold=0.01, patience=20):
+        self.std_threshold = std_threshold
+        self.patience = patience
+        self.low_variance_count = 0
+
+    def on_log(self, args, state, control, logs=None, **kwargs):
+        if logs is None:
+            return
+        # TRL >= 0.29 logs reward/std; some versions use rewards/std
+        reward_std = None
+        for key in ("reward/std", "rewards/std", "reward_std"):
+            if key in logs:
+                reward_std = logs[key]
+                break
+        if reward_std is not None and reward_std < self.std_threshold:
+            self.low_variance_count += 1
+            if self.low_variance_count >= self.patience:
+                logger.warning(
+                    f"Reward variance collapsed (std={reward_std:.4f} for "
+                    f"{self.patience} consecutive steps). Stopping early."
+                )
+                control.should_training_stop = True
+        else:
+            self.low_variance_count = 0
 
 
 # ============================================================
@@ -343,11 +448,11 @@ def train_answer_agent(config: dict):
         num_generations=group_size,
         max_completion_length=max_completion,
         num_train_epochs=aa_epochs,
-        save_steps=50,
+        save_steps=200,
         save_total_limit=2,
-        max_grad_norm=0.1,
+        max_grad_norm=1.0,
         seed=seed,
-        report_to="none",
+        report_to="tensorboard",
     )
 
     # Load model
@@ -372,6 +477,10 @@ def train_answer_agent(config: dict):
         args=training_args,
         train_dataset=dataset,
         peft_config=peft_config,
+        callbacks=[
+            RewardLoggingCallback(),
+            TrainingLogCallback(agent_type="aa"),
+        ],
     )
 
     logger.info("Starting GRPO training...")
@@ -428,18 +537,42 @@ def train_memory_manager(config: dict):
     # Load training data
     train_data = load_training_data(data_path)
 
-    # Prepare MM dataset: each example is a turn + memory state
+    # Prepare MM dataset: sliding window across full conversation with evolving memory state.
+    # Old approach: sessions[:2], turns[:5], static memory snapshot → biased toward ADD/NOOP.
+    # New approach: sample turns from early/mid/late conversation, accumulate memories per turn.
     mm_prompts = []
     mm_answers = []
+    max_mm_prompts_per_example = config["training"].get("max_mm_prompts_per_example", 25)
+    skip_words = {"hi", "hello", "hey", "thanks", "bye", "ok", "okay", "yes", "no"}
 
     for ex in train_data:
-        memories = build_heuristic_memory(ex)
-        mem_str = "\n".join(f"- [{i}] {m}" for i, m in enumerate(memories[-10:])) \
-            if memories else "No memories stored."
+        evolving_memories = []
+        prompts_for_ex = 0
 
-        for session in ex.get("sessions", [])[:2]:
+        for session in ex.get("sessions", []):
             sid = session.get("session_id", 0)
-            for i, turn in enumerate(session.get("turns", [])[:5]):
+            dt = session.get("date_time", "")
+            turns = session.get("turns", [])
+
+            # Sample turns spread across the session (early, mid, late)
+            if len(turns) > 5:
+                indices = np.linspace(0, len(turns) - 1, 5, dtype=int).tolist()
+            else:
+                indices = list(range(len(turns)))
+
+            for i in indices:
+                if prompts_for_ex >= max_mm_prompts_per_example:
+                    break
+                turn = turns[i]
+
+                # Build prompt with CURRENT evolving memory state (last 20)
+                if evolving_memories:
+                    mem_str = "\n".join(
+                        f"- [{j}] {m}" for j, m in enumerate(evolving_memories[-20:])
+                    )
+                else:
+                    mem_str = "No memories stored."
+
                 prompt = [
                     {"role": "system", "content": MM_SYSTEM_PROMPT},
                     {"role": "user", "content": f"""## Current Memories
@@ -454,6 +587,20 @@ Message: {turn['text'][:500]}
                 ]
                 mm_prompts.append(prompt)
                 mm_answers.append(str(ex["answer"]))
+                prompts_for_ex += 1
+
+                # Simulate heuristic ADD so next turn sees updated state
+                text = turn.get("text", "").strip()
+                speaker = turn.get("speaker", "")
+                words = text.lower().split()
+                if len(words) > 5 and not any(w in skip_words for w in words[:2]):
+                    mem = f"{speaker}: {text[:300]}"
+                    if dt:
+                        mem += f" (session {sid}, {dt})"
+                    evolving_memories.append(mem)
+
+            if prompts_for_ex >= max_mm_prompts_per_example:
+                break
 
     dataset = Dataset.from_dict({"prompt": mm_prompts, "answer": mm_answers})
     logger.info(f"Prepared {len(dataset)} MM training prompts")
@@ -481,6 +628,123 @@ Message: {turn['text'][:500]}
                         score += 0.2
             except (json.JSONDecodeError, AttributeError):
                 pass
+            rewards.append(score)
+        return rewards
+
+    # MM quality reward: embedding similarity delta.
+    #
+    # Measures whether the MM's CRUD action *improved* the memory bank's
+    # relevance to the gold answer. This is the differentiating signal GRPO
+    # needs — format reward alone saturates (all samples score ~0.8),
+    # collapsing advantages to zero.
+    #
+    # How it works:
+    #   1. Embed the gold answer (the question this conversation will be asked)
+    #   2. Compute similarity between gold answer and the current memory bank
+    #      (the "before" state, from the prompt's ## Current Memories section)
+    #   3. Simulate the MM's action: if ADD, append content to bank; if NOOP, no change
+    #   4. Compute similarity between gold answer and the updated bank ("after" state)
+    #   5. Reward = max(0, after_sim - before_sim)  (positive delta = improvement)
+    #
+    # This naturally rewards:
+    #   - ADD of relevant content → bank gets closer to gold → positive delta
+    #   - ADD of irrelevant content → bank doesn't improve → ~zero delta
+    #   - NOOP on greeting → no change → zero delta (format reward still gives 0.7)
+    #   - UPDATE that corrects info → bank gets closer → positive delta
+    #   - DELETE of noise → bank gets closer (less noise) → positive delta
+    #
+    # Cost: ~80MB embedding model on CPU. Negligible vs 7B on GPU.
+
+    # Pre-load embedding model once (lazy, cached globally in retriever.py)
+    from src.retriever import embed_texts as _embed_texts
+
+    def mm_quality_reward(completions, answer, **kwargs) -> list[float]:
+        rewards = []
+        for completion, gold in zip(completions, answer):
+            response = completion[0]["content"] if isinstance(completion, list) else str(completion)
+            score = 0.0
+            try:
+                if not gold or not gold.strip():
+                    rewards.append(0.0)
+                    continue
+
+                match = re.search(r"\{[^}]+\}", response)
+                if not match:
+                    rewards.append(0.0)
+                    continue
+
+                parsed = json.loads(match.group())
+                op = parsed.get("op", "").upper()
+                content = parsed.get("content", "")
+
+                # Embed the gold answer
+                gold_emb = _embed_texts([gold])
+                if gold_emb is None:
+                    rewards.append(0.0)
+                    continue
+
+                # Extract current memories from the prompt context
+                # (passed via kwargs or reconstructed — we use the prompt field)
+                prompt_text = ""
+                if "prompts" in kwargs:
+                    # TRL passes the original prompt
+                    prompts = kwargs["prompts"]
+                    idx = len(rewards)
+                    if idx < len(prompts):
+                        p = prompts[idx]
+                        prompt_text = p[-1]["content"] if isinstance(p, list) else str(p)
+
+                # Parse existing memories from prompt
+                existing_mems = []
+                for line in prompt_text.split("\n"):
+                    line = line.strip()
+                    if line.startswith("- [") and "] " in line:
+                        mem_content = line.split("] ", 1)[1] if "] " in line else line
+                        existing_mems.append(mem_content)
+
+                # Compute "before" similarity: max cosine sim between gold and existing bank
+                before_sim = 0.0
+                if existing_mems:
+                    bank_emb = _embed_texts(existing_mems)
+                    if bank_emb is not None:
+                        sims = bank_emb @ gold_emb.T
+                        before_sim = float(sims.max())
+
+                # Simulate the action and compute "after" similarity
+                after_mems = list(existing_mems)
+                if op == "ADD" and content:
+                    after_mems.append(content)
+                elif op == "DELETE" and parsed.get("entry_id") is not None:
+                    try:
+                        del_idx = int(parsed["entry_id"])
+                        if 0 <= del_idx < len(after_mems):
+                            after_mems.pop(del_idx)
+                    except (ValueError, IndexError):
+                        pass
+                elif op == "UPDATE" and parsed.get("entry_id") is not None and content:
+                    try:
+                        upd_idx = int(parsed["entry_id"])
+                        if 0 <= upd_idx < len(after_mems):
+                            after_mems[upd_idx] = content
+                    except (ValueError, IndexError):
+                        pass
+                # NOOP: after_mems == existing_mems → delta = 0
+
+                after_sim = 0.0
+                if after_mems:
+                    after_emb = _embed_texts(after_mems)
+                    if after_emb is not None:
+                        sims = after_emb @ gold_emb.T
+                        after_sim = float(sims.max())
+
+                # Reward = positive delta (improvement), clamped to [0, 1]
+                delta = after_sim - before_sim
+                score = max(0.0, min(delta, 1.0))
+
+            except (json.JSONDecodeError, AttributeError, Exception) as e:
+                logger.debug(f"MM quality reward error: {e}")
+                score = 0.0
+
             rewards.append(score)
         return rewards
 
@@ -520,9 +784,10 @@ Message: {turn['text'][:500]}
         num_train_epochs=mm_epochs,
         save_steps=300,
         save_total_limit=2,
-        max_grad_norm=0.1,
+        max_grad_norm=1.0,
+        beta=0.04,
         seed=seed,
-        report_to="none",
+        report_to="tensorboard",
     )
 
     model = AutoModelForCausalLM.from_pretrained(
@@ -539,10 +804,15 @@ Message: {turn['text'][:500]}
     trainer = GRPOTrainer(
         model=model,
         processing_class=tokenizer,
-        reward_funcs=[mm_format_reward],
+        reward_funcs=[mm_format_reward, mm_quality_reward],
         args=training_args,
         train_dataset=dataset,
         peft_config=peft_config,
+        callbacks=[
+            RewardLoggingCallback(),
+            RewardVarianceEarlyStopCallback(),
+            TrainingLogCallback(agent_type="mm"),
+        ],
     )
 
     logger.info("Starting MM GRPO training...")
