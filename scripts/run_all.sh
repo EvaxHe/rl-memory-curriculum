@@ -100,7 +100,7 @@ START_TIME=$(date +%s)
 for label_config in "A:$CONFIG_A:config_a_locomo_only" "B:$CONFIG_B:config_b_mixed" "C:$CONFIG_C:config_c_longmemeval_only"; do
     IFS=':' read -r label config prefix <<< "$label_config"
 
-    if [ ! -d "checkpoints/${prefix}/answer_agent" ]; then
+    if [ ! -f "checkpoints/${prefix}/answer_agent/training_meta.json" ]; then
         echo "=== Training Config ${label} — Answer Agent ==="
         echo "Config: $config"
         echo "Start: $(date)"
@@ -108,7 +108,7 @@ for label_config in "A:$CONFIG_A:config_a_locomo_only" "B:$CONFIG_B:config_b_mix
         echo "Config ${label} AA done: $(date)"
         echo ""
     else
-        echo "=== Config ${label} AA — SKIPPED (checkpoint exists) ==="
+        echo "=== Config ${label} AA — SKIPPED (training_meta.json exists) ==="
     fi
 done
 
@@ -116,7 +116,7 @@ done
 for label_config in "A:$CONFIG_A:config_a_locomo_only" "B:$CONFIG_B:config_b_mixed" "C:$CONFIG_C:config_c_longmemeval_only"; do
     IFS=':' read -r label config prefix <<< "$label_config"
 
-    if [ ! -d "checkpoints/${prefix}/memory_manager" ]; then
+    if [ ! -f "checkpoints/${prefix}/memory_manager/training_meta.json" ]; then
         echo "=== Training Config ${label} — Memory Manager ==="
         echo "Config: $config"
         echo "Start: $(date)"
@@ -124,7 +124,7 @@ for label_config in "A:$CONFIG_A:config_a_locomo_only" "B:$CONFIG_B:config_b_mix
         echo "Config ${label} MM done: $(date)"
         echo ""
     else
-        echo "=== Config ${label} MM — SKIPPED (checkpoint exists) ==="
+        echo "=== Config ${label} MM — SKIPPED (training_meta.json exists) ==="
     fi
 done
 
