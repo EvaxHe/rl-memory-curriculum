@@ -63,7 +63,7 @@ def load_model_and_tokenizer(model_config):
 
     if is_lora:
         from peft import PeftModel
-        base_model_name = model_config.get("base_model", "Qwen/Qwen2.5-7B-Instruct")
+        base_model_name = model_config.get("base_model", "unsloth/Qwen3.5-4B")
         logger.info(f"Loading base model: {base_model_name}")
         model = AutoModelForCausalLM.from_pretrained(
             base_model_name, torch_dtype=torch.bfloat16, device_map="auto",
@@ -474,7 +474,7 @@ def load_mm_model(model_config):
         mm_tokenizer = AutoTokenizer.from_pretrained(mm_checkpoint)
     elif is_lora:
         from peft import PeftModel
-        base_model_name = model_config.get("base_model", "Qwen/Qwen2.5-7B-Instruct")
+        base_model_name = model_config.get("base_model", "unsloth/Qwen3.5-4B")
         mm_model = AutoModelForCausalLM.from_pretrained(
             base_model_name, torch_dtype=torch.bfloat16, device_map="auto",
         )
@@ -547,7 +547,7 @@ def load_model_vllm(model_config, gpu_memory_utilization=0.85,
     is_lora, is_full_ft = _detect_checkpoint_type(checkpoint, model_config)
 
     if is_lora:
-        base_model_name = model_config.get("base_model", "Qwen/Qwen2.5-7B-Instruct")
+        base_model_name = model_config.get("base_model", "unsloth/Qwen3.5-4B")
         model_path = _merge_lora_to_tmpdir(checkpoint, base_model_name)
     else:
         model_path = checkpoint
@@ -578,7 +578,7 @@ def load_mm_model_vllm(model_config, gpu_memory_utilization=0.45,
     is_lora, is_full_ft = _detect_checkpoint_type(mm_checkpoint, model_config)
 
     if is_lora:
-        base_model_name = model_config.get("base_model", "Qwen/Qwen2.5-7B-Instruct")
+        base_model_name = model_config.get("base_model", "unsloth/Qwen3.5-4B")
         model_path = _merge_lora_to_tmpdir(mm_checkpoint, base_model_name)
     else:
         model_path = mm_checkpoint

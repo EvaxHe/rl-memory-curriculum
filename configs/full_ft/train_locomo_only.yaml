@@ -1,11 +1,11 @@
 # Config A (Full FT): LoCoMo-only training (Memory-R1 baseline curriculum)
-# Requires H100 80GB or A100 80GB
+# Qwen3.5-4B full fine-tuning via Unsloth, ~40GB VRAM
 experiment:
   name: "config_a_locomo_only"
   seed: 42
 
 model:
-  name: "Qwen/Qwen2.5-7B-Instruct"
+  name: "unsloth/Qwen3.5-4B"
 
 data:
   train_file: "data/processed/locomo_train.jsonl"
@@ -15,6 +15,7 @@ training:
   algorithm: "grpo"
   use_lora: false
   gradient_checkpointing: true
+  max_seq_length: 2048
   batch_size: 2
   group_size: 4
   learning_rate: 1.0e-6

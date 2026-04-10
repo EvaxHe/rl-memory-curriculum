@@ -1,14 +1,15 @@
 """
-GRPO training for Memory-R1 Answer Agent and Memory Manager using TRL.
+GRPO training for Memory-R1 Answer Agent and Memory Manager using TRL + Unsloth.
 
+Uses Unsloth's FastLanguageModel for efficient training of Qwen3.5-4B.
 Supports both LoRA and full fine-tuning, controlled by YAML config.
 No code changes needed between configurations.
 
 Usage:
-    # Train Answer Agent with LoRA (default, ≥48GB GPU)
+    # Train Answer Agent with LoRA (default, ~10GB VRAM)
     python src/train_grpo.py --config configs/train_locomo_only.yaml --agent answer_agent
 
-    # Train both agents with full FT (≥80GB GPU)
+    # Train both agents with full FT (≥40GB GPU)
     python src/train_grpo.py --config configs/full_ft/train_locomo_only.yaml --agent both
 """
 import argparse
@@ -386,28 +387,54 @@ Rules:
 # Training functions
 # ============================================================
 
-def get_peft_config(config: dict):
-    """Return LoRA config if use_lora is true, else None (full FT)."""
-    use_lora = config["training"].get("use_lora", True)
-    if not use_lora:
-        logger.info("Full fine-tuning mode (no LoRA)")
-        return None
+def load_model_unsloth(config: dict, max_seq_length: int = 2048):
+    """Load model and tokenizer via Unsloth's FastLanguageModel.
 
-    from peft import LoraConfig
-    logger.info("LoRA mode (r=16, alpha=32)")
-    return LoraConfig(
-        r=16,
-        lora_alpha=32,
-        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
-                         "up_proj", "down_proj", "gate_proj"],
-        task_type="CAUSAL_LM",
-        lora_dropout=0.05,
+    Handles both LoRA and full fine-tuning.
+    Qwen3.5 is not yet supported by vLLM, so fast_inference is disabled.
+    """
+    from unsloth import FastLanguageModel
+
+    model_name = config["model"]["name"]
+    use_lora = config["training"].get("use_lora", True)
+    seed = config["experiment"].get("seed", 42)
+
+    logger.info(f"Loading model via Unsloth: {model_name}")
+    logger.info(f"Mode: {'LoRA' if use_lora else 'Full fine-tuning'}")
+
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=model_name,
+        max_seq_length=max_seq_length,
+        load_in_4bit=False,
+        load_in_16bit=True,
+        fast_inference=False,  # Qwen3.5 not supported by vLLM yet
+        full_finetuning=not use_lora,
     )
+
+    if use_lora:
+        lora_r = config["training"].get("lora_rank", 16)
+        lora_alpha = config["training"].get("lora_alpha", 16)
+        logger.info(f"Applying LoRA (r={lora_r}, alpha={lora_alpha})")
+        model = FastLanguageModel.get_peft_model(
+            model,
+            r=lora_r,
+            target_modules=[
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj",
+            ],
+            lora_alpha=lora_alpha,
+            lora_dropout=0,
+            bias="none",
+            use_gradient_checkpointing="unsloth",
+            random_state=seed,
+            max_seq_length=max_seq_length,
+        )
+
+    return model, tokenizer
 
 
 def train_answer_agent(config: dict):
-    """Train Answer Agent with GRPO via TRL."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    """Train Answer Agent with GRPO via TRL + Unsloth."""
     from trl import GRPOConfig, GRPOTrainer
 
     model_name = config["model"]["name"]
@@ -435,9 +462,6 @@ def train_answer_agent(config: dict):
     dataset = prepare_aa_dataset(train_data, max_memories=retrieval_top_k)
     logger.info(f"Prepared {len(dataset)} training prompts")
 
-    # LoRA or full FT
-    peft_config = get_peft_config(config)
-
     # GRPO training config
     aa_epochs = config["training"].get("aa_epochs", 2)
     group_size = config["training"].get("group_size", 4)
@@ -445,7 +469,7 @@ def train_answer_agent(config: dict):
     grad_accum = config["training"].get("gradient_accumulation_steps", 4)
     lr = config["training"].get("learning_rate", 5e-6)
     max_completion = config["training"].get("aa_max_completion_length", 512)
-    use_grad_ckpt = config["training"].get("gradient_checkpointing", False)
+    max_seq_length = config["training"].get("max_seq_length", 2048)
 
     output_dir = f"checkpoints/{exp_name}/answer_agent"
 
@@ -471,7 +495,7 @@ def train_answer_agent(config: dict):
         bf16=True,
         per_device_train_batch_size=batch_size,
         gradient_accumulation_steps=grad_accum,
-        gradient_checkpointing=use_grad_ckpt,
+        gradient_checkpointing=True,
         num_generations=group_size,
         max_completion_length=max_completion,
         num_train_epochs=aa_epochs,
@@ -482,17 +506,8 @@ def train_answer_agent(config: dict):
         report_to=report_to,
     )
 
-    # Load model
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-        device_map=None,
-    ).to("cuda")
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    # Load model via Unsloth
+    model, tokenizer = load_model_unsloth(config, max_seq_length=max_seq_length)
 
     # Build reward functions
     aa_reward = make_aa_reward_func(reward_type)
@@ -521,7 +536,6 @@ def train_answer_agent(config: dict):
         reward_funcs=[aa_reward, format_reward_func],
         args=training_args,
         train_dataset=dataset,
-        peft_config=peft_config,
         callbacks=[
             RewardLoggingCallback(),
             TrainingLogCallback(agent_type="aa", training_meta=aa_training_meta),
@@ -532,11 +546,13 @@ def train_answer_agent(config: dict):
     trainer.train()
 
     # Save
-    trainer.save_model(output_dir)
+    model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
 
     # Save training metadata
     use_lora = config["training"].get("use_lora", True)
+    lora_r = config["training"].get("lora_rank", 16)
+    lora_alpha = config["training"].get("lora_alpha", 16)
     meta = {
         "model": model_name,
         "experiment": exp_name,
@@ -545,15 +561,16 @@ def train_answer_agent(config: dict):
         "group_size": group_size,
         "batch_size": batch_size,
         "gradient_accumulation_steps": grad_accum,
-        "gradient_checkpointing": use_grad_ckpt,
         "num_examples": len(dataset),
         "learning_rate": lr,
         "reward_type": reward_type,
         "retrieval_top_k": retrieval_top_k,
         "max_completion_length": max_completion,
+        "max_seq_length": max_seq_length,
         "use_lora": use_lora,
-        "lora_r": 16 if use_lora else None,
-        "lora_alpha": 32 if use_lora else None,
+        "lora_r": lora_r if use_lora else None,
+        "lora_alpha": lora_alpha if use_lora else None,
+        "unsloth": True,
     }
     with open(f"{output_dir}/training_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
@@ -563,13 +580,12 @@ def train_answer_agent(config: dict):
 
 def train_memory_manager(config: dict):
     """
-    Train Memory Manager with GRPO via TRL.
+    Train Memory Manager with GRPO via TRL + Unsloth.
 
     Single-turn: each prompt is a dialogue turn + current memory state.
     Reward = format correctness of CRUD operation.
     Full multi-turn training with downstream QA reward is future work.
     """
-    from transformers import AutoModelForCausalLM, AutoTokenizer
     from trl import GRPOConfig, GRPOTrainer
 
     model_name = config["model"]["name"]
@@ -800,15 +816,13 @@ Message: {turn['text'][:500]}
             rewards.append(score)
         return rewards
 
-    peft_config = get_peft_config(config)
-
     mm_epochs = config["training"].get("mm_epochs", 2)
     group_size = config["training"].get("group_size", 4)
     batch_size = config["training"].get("batch_size", 1)
     grad_accum = config["training"].get("gradient_accumulation_steps", 4)
     lr = config["training"].get("learning_rate", 5e-6)
     max_completion = config["training"].get("mm_max_completion_length", 256)
-    use_grad_ckpt = config["training"].get("gradient_checkpointing", False)
+    max_seq_length = config["training"].get("max_seq_length", 2048)
     output_dir = f"checkpoints/{exp_name}/memory_manager"
 
     gen_batch = batch_size * grad_accum
@@ -843,7 +857,7 @@ Message: {turn['text'][:500]}
         bf16=True,
         per_device_train_batch_size=batch_size,
         gradient_accumulation_steps=grad_accum,
-        gradient_checkpointing=use_grad_ckpt,
+        gradient_checkpointing=True,
         num_generations=group_size,
         max_completion_length=max_completion,
         num_train_epochs=mm_epochs,
@@ -855,16 +869,8 @@ Message: {turn['text'][:500]}
         report_to=report_to,
     )
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="sdpa",
-        device_map=None,
-    ).to("cuda")
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+    # Load model via Unsloth
+    model, tokenizer = load_model_unsloth(config, max_seq_length=max_seq_length)
 
     # Build training metadata for wandb config
     mm_training_meta = {
@@ -888,7 +894,6 @@ Message: {turn['text'][:500]}
         reward_funcs=[mm_format_reward, mm_quality_reward],
         args=training_args,
         train_dataset=dataset,
-        peft_config=peft_config,
         callbacks=[
             RewardLoggingCallback(),
             RewardVarianceEarlyStopCallback(),
@@ -899,10 +904,12 @@ Message: {turn['text'][:500]}
     logger.info("Starting MM GRPO training...")
     trainer.train()
 
-    trainer.save_model(output_dir)
+    model.save_pretrained(output_dir)
     tokenizer.save_pretrained(output_dir)
 
     use_lora = config["training"].get("use_lora", True)
+    lora_r = config["training"].get("lora_rank", 16)
+    lora_alpha = config["training"].get("lora_alpha", 16)
     meta = {
         "model": model_name,
         "experiment": exp_name,
@@ -911,13 +918,14 @@ Message: {turn['text'][:500]}
         "group_size": group_size,
         "batch_size": batch_size,
         "gradient_accumulation_steps": grad_accum,
-        "gradient_checkpointing": use_grad_ckpt,
         "num_examples": len(dataset),
         "learning_rate": lr,
         "max_completion_length": max_completion,
+        "max_seq_length": max_seq_length,
         "use_lora": use_lora,
-        "lora_r": 16 if use_lora else None,
-        "lora_alpha": 32 if use_lora else None,
+        "lora_r": lora_r if use_lora else None,
+        "lora_alpha": lora_alpha if use_lora else None,
+        "unsloth": True,
     }
     with open(f"{output_dir}/training_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)

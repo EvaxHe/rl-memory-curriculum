@@ -46,5 +46,4 @@ data/processed/
 results/*_predictions.jsonl
 results/judge_done.flag
 checkpoints
-wandb
-logs
+remote_results
