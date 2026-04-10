@@ -9,7 +9,7 @@ import logging
 from collections import defaultdict
 from pathlib import Path
 
-from src.reward import token_f1, bleu1, exact_match
+from src.common.scoring import token_f1, bleu1, exact_match
 
 logger = logging.getLogger(__name__)
 

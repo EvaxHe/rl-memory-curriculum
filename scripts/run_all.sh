@@ -104,7 +104,7 @@ for label_config in "A:$CONFIG_A:config_a_locomo_only" "B:$CONFIG_B:config_b_mix
         echo "=== Training Config ${label} — Answer Agent ==="
         echo "Config: $config"
         echo "Start: $(date)"
-        uv run python3 src/train_grpo.py --config "$config" --agent answer_agent
+        uv run python3 -m src.train.grpo --config "$config" --agent answer_agent
         echo "Config ${label} AA done: $(date)"
         echo ""
     else
@@ -120,7 +120,7 @@ for label_config in "A:$CONFIG_A:config_a_locomo_only" "B:$CONFIG_B:config_b_mix
         echo "=== Training Config ${label} — Memory Manager ==="
         echo "Config: $config"
         echo "Start: $(date)"
-        uv run python3 src/train_grpo.py --config "$config" --agent memory_manager
+        uv run python3 -m src.train.grpo --config "$config" --agent memory_manager
         echo "Config ${label} MM done: $(date)"
         echo ""
     else
@@ -131,13 +131,13 @@ done
 # 8. Evaluation
 echo "=== Step 8: Evaluation ==="
 echo "Start: $(date)"
-uv run python3 eval/run_eval.py --config "$EVAL_CONFIG" --skip-judge ${EVAL_EXTRA}
+uv run python3 -m src.eval.runner --config "$EVAL_CONFIG" --skip-judge ${EVAL_EXTRA}
 echo "Eval done: $(date)"
 echo ""
 
 # 9. Analysis + paper tables
 echo "=== Step 9: Analysis ==="
-uv run python3 eval/analyze_results.py --results "${RESULTS_DIR}/all_results.json" --output paper/tables/
+uv run python3 -m src.eval.analyze --results "${RESULTS_DIR}/all_results.json" --output paper/tables/
 echo ""
 
 # Timing

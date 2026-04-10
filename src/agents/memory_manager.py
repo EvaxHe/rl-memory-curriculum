@@ -8,50 +8,18 @@ During training, this agent is fine-tuned with GRPO to learn optimal
 memory management policies. During inference, it generates structured
 JSON operations.
 """
-from typing import Optional
-
-# ---- Prompt Templates ----
-
-MEMORY_MANAGER_SYSTEM = """You are a Memory Manager for a conversational AI assistant.
-Your job is to maintain an external memory bank by deciding what information to store,
-update, or remove after each dialogue turn.
-
-Given the current dialogue turn and existing memories, output a JSON operation:
-
-Operations:
-- ADD: Store new important information. Output: {"op": "ADD", "content": "<fact to store>"}
-- UPDATE: Modify an existing memory with new info. Output: {"op": "UPDATE", "entry_id": "<id>", "content": "<updated fact>"}
-- DELETE: Remove outdated/incorrect memory. Output: {"op": "DELETE", "entry_id": "<id>"}
-- NOOP: No memory change needed. Output: {"op": "NOOP"}
-
-Rules:
-1. Only ADD facts that are important for future conversations (preferences, events, relationships).
-2. UPDATE when the user corrects or changes a previously stated fact.
-3. DELETE when information is explicitly retracted or clearly wrong.
-4. NOOP when the turn is casual/greeting or contains no memorable information.
-5. Output exactly ONE operation per turn as valid JSON."""
-
-MEMORY_MANAGER_USER_TEMPLATE = """## Current Memories
-{memories}
-
-## Current Dialogue Turn
-Session {session_id}, Turn {turn_id}:
-Speaker: {speaker}
-Message: {message}
-
-## Your Decision (output valid JSON):"""
-
-
 import json
 import re
-from src.memory_bank import MemoryBank
+
+from src.memory.bank import MemoryBank
+from src.common.prompts import MM_SYSTEM_PROMPT, MM_USER_TEMPLATE
 
 
 def build_mm_prompt(memory_bank: MemoryBank, session_id: int,
                     turn_id: int, speaker: str, message: str) -> list[dict]:
     """Build the prompt for the Memory Manager."""
     memories_str = memory_bank.format_for_prompt()
-    user_msg = MEMORY_MANAGER_USER_TEMPLATE.format(
+    user_msg = MM_USER_TEMPLATE.format(
         memories=memories_str,
         session_id=session_id,
         turn_id=turn_id,
@@ -59,7 +27,7 @@ def build_mm_prompt(memory_bank: MemoryBank, session_id: int,
         message=message,
     )
     return [
-        {"role": "system", "content": MEMORY_MANAGER_SYSTEM},
+        {"role": "system", "content": MM_SYSTEM_PROMPT},
         {"role": "user", "content": user_msg},
     ]
 

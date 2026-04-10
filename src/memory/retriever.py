@@ -20,13 +20,13 @@ _tokenizer = None
 
 
 def get_embedder(model_name: str = "sentence-transformers/all-MiniLM-L6-v2"):
-    """Lazy-load the sentence transformer model."""
+    """Lazy-load the sentence transformer model on CPU to avoid GPU memory pressure."""
     global _model
     if _model is None:
         try:
             from sentence_transformers import SentenceTransformer
-            _model = SentenceTransformer(model_name)
-            logger.info(f"Loaded embedding model: {model_name}")
+            _model = SentenceTransformer(model_name, device="cpu")
+            logger.info(f"Loaded embedding model: {model_name} (device=cpu)")
         except ImportError:
             logger.warning(
                 "sentence-transformers not installed. "

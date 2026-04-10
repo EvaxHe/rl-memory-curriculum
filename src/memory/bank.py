@@ -1,47 +1,19 @@
 """
-External memory bank for Memory-R1.
-Stores structured memory entries that the Memory Manager can ADD, UPDATE, DELETE.
-Each entry carries provenance (source session, timestamp) for traceability.
+MemoryBank — dict-backed storage with CRUD operations, state, and serialization.
+
+Search, formatting, and retrieval logic live in sibling modules
+(search.py, formatting.py, retriever.py) to keep this class focused on storage.
 """
-from dataclasses import dataclass, field
-from typing import Optional
 import json
 import hashlib
+from typing import Optional
 
-
-@dataclass
-class MemoryEntry:
-    """A single memory entry in the bank."""
-    entry_id: str
-    content: str
-    source_session: int
-    timestamp: Optional[str] = None
-    created_at: int = 0   # turn number when created
-    updated_at: int = 0   # turn number when last updated
-
-    def to_dict(self) -> dict:
-        return {
-            "entry_id": self.entry_id,
-            "content": self.content,
-            "source_session": self.source_session,
-            "timestamp": self.timestamp,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-        }
-
-    @classmethod
-    def from_dict(cls, d: dict) -> "MemoryEntry":
-        return cls(**d)
-
-    def __str__(self) -> str:
-        return f"[{self.entry_id}] {self.content}"
+from src.memory.entry import MemoryEntry
 
 
 class MemoryBank:
     """
     Dict-based memory bank supporting ADD, UPDATE, DELETE, NOOP.
-    Uses FAISS for embedding-based retrieval when available,
-    falls back to keyword overlap.
     """
 
     def __init__(self, use_embeddings: bool = True):
@@ -88,7 +60,7 @@ class MemoryBank:
         """Explicit no-operation."""
         pass
 
-    # ---- Retrieval (called by Answer Agent) ----
+    # ---- Retrieval ----
 
     def get_all(self) -> list[MemoryEntry]:
         return list(self.entries.values())
@@ -118,7 +90,7 @@ class MemoryBank:
 
         # Try embedding-based search first
         try:
-            from src.retriever import embed_texts, search_numpy_fallback
+            from src.memory.retriever import embed_texts, search_numpy_fallback
             entries_list = list(self.entries.values())
             texts = [e.content for e in entries_list]
             corpus_emb = embed_texts(texts)

@@ -8,7 +8,7 @@ Produces:
 4. Cost analysis table
 
 Usage:
-    python eval/analyze_results.py --results results/all_results.json --output paper/tables/
+    python -m src.eval.analyze --results results/all_results.json --output paper/tables/
 """
 import argparse
 import json
@@ -169,31 +169,29 @@ def generate_cost_table(phase=1):
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="Generate paper tables")
     parser.add_argument("--results", type=str, default="results/all_results.json")
     parser.add_argument("--output", type=str, default="paper/tables/")
-    parser.add_argument("--phase2", action="store_true")
     args = parser.parse_args()
+
     logging.basicConfig(level=logging.INFO)
+    results = load_results(args.results)
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
-    results = load_results(args.results)
-    phase = 2 if args.phase2 else 1
-    tables = {
-        "table1_main_results.md": generate_main_table(results),
-        "table2_per_type.md": generate_per_type_table(results),
-        "table3_cost.md": generate_cost_table(phase),
-    }
-    aa_mm_table = generate_aa_vs_mm_table(results)
-    if aa_mm_table:
-        tables["table4_aa_vs_mm.md"] = aa_mm_table
-    for filename, content in tables.items():
-        path = output_dir / filename
+
+    table1 = generate_main_table(results)
+    table2 = generate_per_type_table(results)
+    table3 = generate_cost_table()
+
+    for name, content in [
+        ("table1_main_results.md", table1),
+        ("table2_per_type.md", table2),
+        ("table3_cost.md", table3),
+    ]:
+        path = output_dir / name
         with open(path, "w") as f:
             f.write(content)
-        logger.info(f"Generated {path}")
-        print(f"\n--- {filename} ---")
-        print(content)
+        logger.info(f"Wrote {path}")
 
 
 if __name__ == "__main__":

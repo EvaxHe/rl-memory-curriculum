@@ -12,11 +12,11 @@ import logging
 from typing import Optional
 from dataclasses import dataclass
 
-from src.memory_bank import MemoryBank
-from src.memory_manager import (
+from src.memory.bank import MemoryBank
+from src.agents.memory_manager import (
     build_mm_prompt, parse_mm_output, execute_mm_operation
 )
-from src.answer_agent import build_aa_prompt, parse_aa_output
+from src.agents.answer_agent import build_aa_prompt, parse_aa_output
 
 logger = logging.getLogger(__name__)
 

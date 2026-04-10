@@ -20,7 +20,7 @@ uv sync
 echo "Pre-downloading tokenizer..."
 uv run python3 -c "
 from transformers import AutoTokenizer
-tok = AutoTokenizer.from_pretrained('Qwen/Qwen2.5-7B-Instruct')
+tok = AutoTokenizer.from_pretrained('unsloth/Qwen3.5-4B')
 print(f'Tokenizer ready: vocab_size={tok.vocab_size}')
 "
 

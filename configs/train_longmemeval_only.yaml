@@ -1,11 +1,11 @@
 # Config C: LongMemEval-only training (temporal/update focus)
-# Default: Qwen-2.5-7B + LoRA, runs on L40S 48GB or any GPU ≥48GB
+# Default: Qwen3.5-4B + LoRA via Unsloth, ~10GB VRAM
 experiment:
   name: "config_c_longmemeval_only"
   seed: 42
 
 model:
-  name: "Qwen/Qwen2.5-7B-Instruct"
+  name: "unsloth/Qwen3.5-4B"
 
 data:
   train_file: "data/processed/longmemeval_train.jsonl"
@@ -15,8 +15,9 @@ training:
   algorithm: "grpo"
   use_lora: true
   lora_rank: 16
-  lora_alpha: 32
+  lora_alpha: 16
   gradient_checkpointing: true
+  max_seq_length: 2048
   batch_size: 1
   group_size: 4
   learning_rate: 5.0e-6
@@ -33,3 +34,8 @@ reward:
 
 retrieval:
   top_k: 60
+
+wandb:
+  project: "rl-memory-curriculum"
+  entity: null
+  enabled: true

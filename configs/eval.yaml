@@ -1,5 +1,6 @@
 # Evaluation: 7 models × 2 benchmarks
 # Works with both LoRA and Full FT checkpoints (auto-detected from training_meta.json)
+# Note: Qwen3.5 requires vLLM >= 0.17. Use --backend hf if vLLM 0.17 is not available.
 evaluation:
   benchmarks:
     - name: "locomo"
@@ -12,35 +13,35 @@ evaluation:
   models:
     # 1. Baseline: no RL
     - name: "baseline_no_rl"
-      checkpoint: "Qwen/Qwen2.5-7B-Instruct"
+      checkpoint: "unsloth/Qwen3.5-4B"
       is_baseline: true
 
     # 2-4. AA-only (no MM training)
     - name: "config_a_aa_only"
       checkpoint: "checkpoints/config_a_locomo_only/answer_agent/"
-      base_model: "Qwen/Qwen2.5-7B-Instruct"
+      base_model: "unsloth/Qwen3.5-4B"
     - name: "config_b_aa_only"
       checkpoint: "checkpoints/config_b_mixed/answer_agent/"
-      base_model: "Qwen/Qwen2.5-7B-Instruct"
+      base_model: "unsloth/Qwen3.5-4B"
     - name: "config_c_aa_only"
       checkpoint: "checkpoints/config_c_longmemeval_only/answer_agent/"
-      base_model: "Qwen/Qwen2.5-7B-Instruct"
+      base_model: "unsloth/Qwen3.5-4B"
 
     # 5-7. AA+MM (full pipeline)
     - name: "config_a_full"
       checkpoint: "checkpoints/config_a_locomo_only/answer_agent/"
       mm_checkpoint: "checkpoints/config_a_locomo_only/memory_manager/"
-      base_model: "Qwen/Qwen2.5-7B-Instruct"
+      base_model: "unsloth/Qwen3.5-4B"
       use_mm: true
     - name: "config_b_full"
       checkpoint: "checkpoints/config_b_mixed/answer_agent/"
       mm_checkpoint: "checkpoints/config_b_mixed/memory_manager/"
-      base_model: "Qwen/Qwen2.5-7B-Instruct"
+      base_model: "unsloth/Qwen3.5-4B"
       use_mm: true
     - name: "config_c_full"
       checkpoint: "checkpoints/config_c_longmemeval_only/answer_agent/"
       mm_checkpoint: "checkpoints/config_c_longmemeval_only/memory_manager/"
-      base_model: "Qwen/Qwen2.5-7B-Instruct"
+      base_model: "unsloth/Qwen3.5-4B"
       use_mm: true
 
   metrics:
@@ -60,9 +61,14 @@ evaluation:
     precision: "bf16"
     batch_size: 8               # HF backend only; vLLM handles batching internally
     gpu_memory_utilization: 0.85  # vLLM only; reduced to 0.45 automatically when AA+MM both loaded
-    max_model_len: 16384        # vLLM max sequence length (Qwen2.5-7B supports up to 32768)
+    max_model_len: 4096         # vLLM max sequence length
 
   retrieval:
     top_k: 60
 
   output_dir: "results/"
+
+wandb:
+  project: "rl-memory-curriculum"
+  entity: null
+  enabled: true
