@@ -1,5 +1,5 @@
 """
-Reward functions for GRPO training.
+Reward/scoring functions for GRPO training and evaluation.
 
 Memory-R1 uses token-level F1 as the primary reward signal.
 We also support BLEU-1 and Exact Match for analysis.

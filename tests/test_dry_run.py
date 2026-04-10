@@ -23,11 +23,12 @@ from collections import Counter
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src.memory_bank import MemoryBank, MemoryEntry
-from src.memory_manager import build_mm_prompt, parse_mm_output, execute_mm_operation
-from src.answer_agent import build_aa_prompt, parse_aa_output
-from src.reward import token_f1, bleu1, exact_match, compute_reward
-from eval.metrics import evaluate_predictions, format_results_table
+from src.memory.bank import MemoryBank
+from src.memory.entry import MemoryEntry
+from src.agents.memory_manager import build_mm_prompt, parse_mm_output, execute_mm_operation
+from src.agents.answer_agent import build_aa_prompt, parse_aa_output
+from src.common.scoring import token_f1, bleu1, exact_match, compute_reward
+from src.eval.metrics import evaluate_predictions, format_results_table
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -37,7 +38,7 @@ DATA_DIR = Path(__file__).parent.parent / "data" / "processed"
 
 def load_jsonl(path: Path) -> list[dict]:
     data = []
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         for line in f:
             if line.strip():
                 data.append(json.loads(line))

@@ -145,13 +145,13 @@ if errorlevel 1 goto :error
 
 echo === Step 8: Evaluation ===
 echo Start: %date% %time%
-uv run python eval\run_eval.py --config "%EVAL_CONFIG%" --skip-judge %EVAL_EXTRA%
+uv run python -m src.eval.runner --config "%EVAL_CONFIG%" --skip-judge %EVAL_EXTRA%
 if errorlevel 1 goto :error
 echo Eval done: %date% %time%
 echo.
 
 echo === Step 9: Analysis ===
-uv run python eval\analyze_results.py --results "%RESULTS_DIR%\all_results.json" --output paper\tables\
+uv run python -m src.eval.analyze --results "%RESULTS_DIR%\all_results.json" --output paper\tables\
 if errorlevel 1 goto :error
 echo.
 
@@ -188,7 +188,7 @@ if exist "%T_CKPT%\NUL" goto :train_skip
 echo === Training Config %T_LABEL% - %T_TITLE% ===
 echo Config: %T_CONFIG%
 echo Start: %date% %time%
-uv run python src\train_grpo.py --config "%T_CONFIG%" --agent %T_AGENT%
+uv run python -m src.train.grpo --config "%T_CONFIG%" --agent %T_AGENT%
 if errorlevel 1 exit /b 1
 
 if /I "%T_AGENT%"=="answer_agent" goto :train_done_aa

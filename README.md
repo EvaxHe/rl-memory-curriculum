@@ -123,25 +123,43 @@ across conversation sessions — not the LLM's internal weights or context windo
 
 ```
 rl-memory-curriculum/
-├── configs/                    # Training and eval YAML configs
+├── configs/                         # Training and eval YAML configs
 │   ├── train_locomo_only.yaml       # Config A (LoRA, default)
 │   ├── train_mixed.yaml             # Config B (LoRA, default)
 │   ├── train_longmemeval_only.yaml  # Config C (LoRA, default)
 │   ├── eval.yaml                    # Evaluation config
 │   └── full_ft/                     # Full FT variants (≥80GB GPU)
-├── data/                       # Data preparation + processed JSONL
-├── src/                        # Core implementation
-│   ├── train_grpo.py                # GRPO training (TRL GRPOTrainer)
-│   ├── reward.py                    # Reward functions (EM + format)
-│   ├── memory_bank.py               # External memory store
-│   ├── memory_manager.py            # CRUD policy (RL-trained)
-│   ├── answer_agent.py              # Memory-augmented QA (RL-trained)
-│   ├── retriever.py                 # Embedding-based retrieval
+├── data/                            # Data preparation + processed JSONL
+├── src/
+│   ├── common/                      # Shared utilities
+│   │   ├── config.py                #   YAML config loader
+│   │   ├── prompts.py               #   Canonical AA/MM prompt templates
+│   │   └── scoring.py               #   Reward functions (F1, EM, BLEU-1)
+│   ├── memory/                      # External memory subsystem
+│   │   ├── entry.py                 #   MemoryEntry dataclass
+│   │   ├── bank.py                  #   MemoryBank key-value store
+│   │   ├── retriever.py             #   Embedding-based retrieval
+│   │   └── heuristic.py             #   Heuristic memory builder
+│   ├── agents/                      # Agent implementations
+│   │   ├── answer_agent.py          #   Memory-augmented QA (RL-trained)
+│   │   └── memory_manager.py        #   CRUD policy (RL-trained)
+│   ├── train/                       # GRPO training (python -m src.train.grpo)
+│   │   ├── grpo.py                  #   Training entry point
+│   │   ├── model.py                 #   Unsloth model loader
+│   │   ├── rewards.py               #   AA/MM reward functions
+│   │   ├── datasets.py              #   Dataset preparation
+│   │   └── callbacks.py             #   Trainer callbacks
+│   ├── eval/                        # Evaluation (python -m src.eval.runner)
+│   │   ├── runner.py                #   Eval entry point
+│   │   ├── inference.py             #   Batch inference with vLLM
+│   │   ├── model_loader.py          #   Checkpoint/model loading
+│   │   ├── metrics.py               #   F1, BLEU-1, EM computation
+│   │   ├── judge.py                 #   LLM-as-Judge scoring
+│   │   └── analyze.py               #   Results analysis + table gen
 │   └── pipeline.py                  # End-to-end inference
-├── eval/                       # Evaluation, judge, analysis
-├── scripts/                    # setup.sh, run_all.sh
-├── results/                    # Phase 1 reference results
-└── paper/                      # Figures and tables
+├── scripts/                         # setup.sh, run_all.sh
+├── results/                         # Phase 1 reference results
+└── paper/                           # Figures and tables
 ```
 
 ## Metrics
@@ -183,7 +201,7 @@ The pipeline runs `--skip-judge` by default. To add judge scores after eval:
 
 ```bash
 export OPENAI_API_KEY=sk-...
-uv run python eval/run_eval.py --config configs/eval.yaml --judge-only
+uv run python -m src.eval.runner --config configs/eval.yaml --judge-only
 ```
 
 Any OpenAI-compatible endpoint works — set `OPENAI_BASE_URL` for local/proxy APIs.

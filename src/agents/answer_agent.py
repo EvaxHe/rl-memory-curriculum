@@ -7,39 +7,10 @@ Given a question and retrieved memories, the Answer Agent:
 
 During training, fine-tuned with GRPO where reward = F1(answer, gold_answer).
 """
-
-# ---- Prompt Templates ----
-
-ANSWER_AGENT_SYSTEM = """You are an Answer Agent for a conversational AI assistant.
-You have access to a memory bank containing facts from past conversations.
-
-Given a question and retrieved memories, you must:
-1. Select the most relevant memories for answering the question.
-2. Reason step-by-step using the selected memories.
-3. Provide a concise, accurate answer.
-
-Output format:
-<selected_memories>
-[list the entry IDs you're using, e.g., "a1b2c3, d4e5f6"]
-</selected_memories>
-<reasoning>
-[your step-by-step reasoning]
-</reasoning>
-<answer>
-[your final answer]
-</answer>"""
-
-ANSWER_AGENT_USER_TEMPLATE = """## Retrieved Memories (top {num_retrieved})
-{memories}
-
-## Question
-{question}
-
-## Your Response:"""
-
-
 import re
-from src.memory_bank import MemoryBank, MemoryEntry
+
+from src.memory.entry import MemoryEntry
+from src.common.prompts import AA_SYSTEM_PROMPT, AA_USER_TEMPLATE
 
 
 def build_aa_prompt(question: str, retrieved_memories: list[MemoryEntry]) -> list[dict]:
@@ -56,13 +27,13 @@ def build_aa_prompt(question: str, retrieved_memories: list[MemoryEntry]) -> lis
     else:
         memories_str = "No relevant memories found."
 
-    user_msg = ANSWER_AGENT_USER_TEMPLATE.format(
+    user_msg = AA_USER_TEMPLATE.format(
         num_retrieved=len(retrieved_memories),
         memories=memories_str,
         question=question,
     )
     return [
-        {"role": "system", "content": ANSWER_AGENT_SYSTEM},
+        {"role": "system", "content": AA_SYSTEM_PROMPT},
         {"role": "user", "content": user_msg},
     ]
 
@@ -108,3 +79,12 @@ def parse_aa_output(raw_output: str) -> dict:
             result["answer"] = lines[-1]
 
     return result
+
+
+def extract_answer_from_completion(text: str) -> str:
+    """Extract answer from AA output (XML tags or fallback to last line)."""
+    match = re.search(r"<answer>\s*(.*?)\s*</answer>", text, re.DOTALL)
+    if match:
+        return match.group(1).strip()
+    lines = [l.strip() for l in text.strip().split("\n") if l.strip()]
+    return lines[-1] if lines else ""

@@ -20,8 +20,8 @@ from unittest.mock import MagicMock, patch
 # Ensure project root is on path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from eval.metrics import evaluate_predictions, format_results_table, save_results
-from eval.analyze_results import (
+from src.eval.metrics import evaluate_predictions, format_results_table, save_results
+from src.eval.analyze import (
     generate_main_table, generate_per_type_table, generate_cost_table,
     generate_aa_vs_mm_table,
 )
@@ -80,7 +80,7 @@ def generate_dummy_predictions(test_file: str, model_name: str,
     """Read real test data, generate dummy predictions."""
     quality = MODEL_QUALITY.get(model_name, 0.3)
     predictions = []
-    with open(test_file) as f:
+    with open(test_file, encoding="utf-8") as f:
         for i, line in enumerate(f):
             if max_examples and i >= max_examples:
                 break
@@ -245,7 +245,7 @@ def test_full_eval_pipeline_dry_run():
 
 def test_vllm_generate_answers():
     """Test vLLM answer generation code path with mocked vLLM."""
-    from eval.run_eval import extract_answer, format_aa_prompt
+    from src.eval.inference import extract_answer, format_aa_prompt
 
     # Mock vLLM output object
     mock_output_obj = MagicMock()
@@ -262,7 +262,7 @@ def test_vllm_generate_answers():
     with patch.dict("sys.modules", {
         "vllm": MagicMock(SamplingParams=lambda **kwargs: mock_sampling_params),
     }):
-        from eval.run_eval import generate_answers_vllm
+        from src.eval.inference import generate_answers_vllm
         prompts = [
             format_aa_prompt("What is the capital of France?", ["France is in Europe"]),
             format_aa_prompt("Who wrote Hamlet?", ["Shakespeare was a playwright"]),
@@ -275,7 +275,7 @@ def test_vllm_generate_answers():
 
 def test_vllm_extract_answer_fallback():
     """Test extract_answer handles non-tagged vLLM output gracefully."""
-    from eval.run_eval import extract_answer
+    from src.eval.inference import extract_answer
     assert extract_answer("<answer>42</answer>") == "42"
     assert extract_answer("The answer is 42") == "The answer is 42"
     assert extract_answer("line1\nline2\nline3") == "line3"
@@ -284,7 +284,7 @@ def test_vllm_extract_answer_fallback():
 
 def test_detect_checkpoint_type():
     """Test _detect_checkpoint_type auto-detection from config flags."""
-    from eval.run_eval import _detect_checkpoint_type
+    from src.eval.model_loader import _detect_checkpoint_type
 
     # Explicit lora flag
     is_lora, is_full_ft = _detect_checkpoint_type(
